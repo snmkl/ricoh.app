@@ -10,16 +10,18 @@ A `WKWebView` renders the UI. A custom URL scheme handler (`gr-cam://`) intercep
 
 ## Requirements
 
-- macOS (Apple Silicon or Intel)
-- Xcode Command Line Tools (`xcode-select --install`)
+- macOS 13.3 or later (Apple Silicon or Intel)
+- Xcode Command Line Tools (`xcode-select --install`) for building
 
 ## Build & Run
 
-```
-make run
+```sh
+./build.sh
+open build/GRBrowser.app
 ```
 
-That's it. Binary lands in `build/GRBrowser`.
+Run `./build.sh install` to build and install in `~/Applications`.
+For development, `make run` still works.
 
 ## Usage
 
