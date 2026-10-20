@@ -36,7 +36,7 @@ mkdir -p "$BUILD_DIR"
 STAGING_DIR="$(mktemp -d "$BUILD_DIR/.app-build.XXXXXX")"
 trap 'rm -rf "$STAGING_DIR"' EXIT
 STAGED_APP="$STAGING_DIR/$APP_NAME.app"
-mkdir -p "$STAGED_APP/Contents/MacOS"
+mkdir -p "$STAGED_APP/Contents/MacOS" "$STAGED_APP/Contents/Resources"
 
 xcrun swiftc "$ROOT_DIR/GRBrowser.swift" \
     -o "$STAGED_APP/Contents/MacOS/$APP_NAME" \
@@ -48,6 +48,18 @@ xcrun swiftc "$ROOT_DIR/GRBrowser.swift" \
     -O
 
 cp "$MANIFEST" "$STAGED_APP/Contents/Info.plist"
+
+# Package standard and Retina icon sizes from the source artwork.
+ICONSET="$STAGING_DIR/AppIcon.iconset"
+mkdir -p "$ICONSET"
+for size in 16 32 128 256 512; do
+    sips -z "$size" "$size" "$ROOT_DIR/Assets/AppIcon.png" \
+        --out "$ICONSET/icon_${size}x${size}.png" >/dev/null
+    retina_size=$((size * 2))
+    sips -z "$retina_size" "$retina_size" "$ROOT_DIR/Assets/AppIcon.png" \
+        --out "$ICONSET/icon_${size}x${size}@2x.png" >/dev/null
+done
+iconutil -c icns "$ICONSET" -o "$STAGED_APP/Contents/Resources/AppIcon.icns"
 
 plutil -lint "$STAGED_APP/Contents/Info.plist"
 # Ad-hoc signing is sufficient for an app built and run on this Mac.
