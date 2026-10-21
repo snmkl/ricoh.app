@@ -19,9 +19,32 @@ let testRoot = URL(fileURLWithPath: CommandLine.arguments[2])
 let fm = FileManager.default
 let terminalPhases = ["completed", "failed", "cancelled"]
 
+var preferenceDomains: [String] = []
+func testPreferences() -> AppPreferences {
+    let name = "GRBrowser.tests.\(UUID().uuidString)"
+    preferenceDomains.append(name)
+    let defaults = UserDefaults(suiteName: name)!
+    defaults.removePersistentDomain(forName: name)
+    return AppPreferences(defaults: defaults)
+}
+final class AppBridge: NSObject, WKScriptMessageHandler {
+    var requests: [[String: Any]] = []
+    func userContentController(_ controller: WKUserContentController, didReceive message: WKScriptMessage) {
+        if let body = message.body as? [String: Any] { requests.append(body) }
+    }
+}
+
 final class ObservedDownload: DownloadHandler, @unchecked Sendable {
     var events: [[String: Any]] = []
     var destination: URL?
+    var saved: [URL] = []
+    var failAfter: Int?
+    override func publishFile(_ source: URL, in directory: URL) throws -> URL {
+        if failAfter == saved.count { throw appError("Injected destination failure") }
+        let result = try super.publishFile(source, in: directory)
+        saved.append(result)
+        return result
+    }
     var chooseCount = 0
     var onEvent: (([String: Any]) -> Void)?
     var onChoose: (() -> Void)?
@@ -33,7 +56,7 @@ final class ObservedDownload: DownloadHandler, @unchecked Sendable {
         onEvent?(event)
     }
 
-    override func chooseDestination(suggestedName: String, completion: @escaping (URL?) -> Void) {
+    override func chooseDirectory(completion: @escaping (URL?) -> Void) {
         check(Thread.isMainThread, "Save chooser runs on the main thread")
         chooseCount += 1
         onChoose?()
@@ -51,8 +74,12 @@ func runDownload(_ name: String, files: [String] = ["DCIM/slow.JPG"],
     try! fm.createDirectory(at: root, withIntermediateDirectories: true)
     let staging = root.appendingPathComponent("staging")
     try! fm.createDirectory(at: staging, withIntermediateDirectories: true)
-    let handler = ObservedDownload(cameraBase: fixtureURL, temporaryDirectory: staging, archiveExecutable: archive)
-    handler.destination = cancel ? nil : root.appendingPathComponent(files.count == 1 ? "saved.JPG" : "saved.zip")
+    let preferences = testPreferences()
+    let output = root.appendingPathComponent("output")
+    try! fm.createDirectory(at: output, withIntermediateDirectories: true)
+    let handler = ObservedDownload(preferences: preferences, cameraBase: fixtureURL, temporaryDirectory: staging, archiveExecutable: archive)
+    handler.destination = cancel ? nil : output
+    if !cancel { try! preferences.setFolder(output) }
     setup?(handler, staging)
     handler.startDownload(id: name, files: files)
     waitFor(name) { handler.terminal != nil }
@@ -67,9 +94,9 @@ check(known.events.contains { event in
     guard let fraction = event["fraction"] as? Double else { return false }
     return fraction > 0 && fraction < 1 && event["completed"] as? Int == 0
 }, "Known-length transfer advances before completion")
-check(known.events.contains { $0["phase"] as? String == "awaiting-save" }, "Waiting-for-save stage emitted")
+check(!known.events.contains { $0["phase"] as? String == "awaiting-save" } && known.chooseCount == 0, "Configured destination skips save dialogs")
 check(known.events.contains { $0["phase"] as? String == "saving" }, "Saving stage emitted")
-check(try! Data(contentsOf: known.destination!).count == 2_097_152, "Single photo output is complete")
+check(try! Data(contentsOf: known.saved.first!).count == 2_097_152, "Single photo output is complete")
 
 let unknown = runDownload("unknown-length", files: ["DCIM/unknown.JPG"])
 check(unknown.events.contains { $0["phase"] as? String == "downloading" && $0["fraction"] == nil },
@@ -86,7 +113,7 @@ check(batch.events.contains { event in
 check(batch.events.contains { $0["phase"] as? String == "archiving" && $0["fraction"] == nil }, "Archive is a separate indeterminate stage")
 let unzip = Process()
 unzip.executableURL = URL(fileURLWithPath: "/usr/bin/unzip")
-unzip.arguments = ["-Z1", batch.destination!.path]
+unzip.arguments = ["-Z1", batch.saved.first!.path]
 let listing = Pipe()
 unzip.standardOutput = listing
 try! unzip.run()
@@ -97,7 +124,7 @@ check(unzip.terminationStatus == 0 && entries.contains("Photos/DCIM/slow.JPG") &
 
 for file in ["missing.JPG", "interrupted.JPG"] {
     let failed = runDownload(file, files: ["DCIM/slow.JPG", "DCIM/\(file)"], expected: "failed")
-    check(failed.chooseCount == 0 && !fm.fileExists(atPath: failed.destination!.path), "No partial ZIP is offered")
+    check(failed.chooseCount == 0 && failed.saved.isEmpty, "No partial ZIP is offered")
     check(failed.terminal?["completed"] as? Int == 1, "Only successful files count as complete")
     failed.startDownload(id: "retry-\(file)", files: ["DCIM/slow.JPG"])
     waitFor("retry after \(file)") { failed.events.filter { terminalPhases.contains($0["phase"] as? String ?? "") }.count == 2 }
@@ -118,12 +145,12 @@ let duplicates = runDownload("duplicate-requests", files: ["DCIM/slow.JPG"], set
     handler.onChoose = { handler.startDownload(id: "duplicate-at-save", files: ["DCIM/slow.JPG"]) }
 })
 RunLoop.main.run(until: Date().addingTimeInterval(0.1))
-check(duplicates.events.allSatisfy { $0["id"] as? String == "duplicate-requests" } && duplicates.chooseCount == 1,
+check(duplicates.events.allSatisfy { $0["id"] as? String == "duplicate-requests" } && duplicates.chooseCount == 0,
       "Native guard rejects duplicate requests including at save time")
 
 _ = runDownload("save-cancelled", expected: "cancelled", cancel: true)
 _ = runDownload("save-write-failed", expected: "failed", setup: { handler, _ in
-    handler.destination = testRoot.appendingPathComponent("absent-parent/output.JPG")
+    handler.failAfter = 0
 })
 _ = runDownload("staging-failed", expected: "failed", setup: { handler, staging in
     var injected = false
@@ -160,7 +187,10 @@ let app = NSApplication.shared
 app.setActivationPolicy(.accessory)
 let bridge = DownloadBridge()
 let config = WKWebViewConfiguration()
+config.websiteDataStore = .nonPersistent()
 config.userContentController.add(bridge, name: "download")
+let appBridge = AppBridge()
+config.userContentController.add(appBridge, name: "app")
 let web = WKWebView(frame: NSRect(x: 0, y: 0, width: 480, height: 360), configuration: config)
 web.loadHTMLString(APP_HTML, baseURL: nil)
 var ready = false
@@ -168,11 +198,11 @@ waitFor("WebKit loads UI") {
     if !web.isLoading { ready = true }
     return ready
 }
-func js(_ script: String) -> Any? {
+func js(_ script: String, on target: WKWebView? = nil) -> Any? {
     var done = false
     var result: Any?
     var problem: Error?
-    web.evaluateJavaScript(script) { value, error in result = value; problem = error; done = true }
+    (target ?? web).evaluateJavaScript(script) { value, error in result = value; problem = error; done = true }
     waitFor("JavaScript evaluation") { done }
     check(problem == nil, "JavaScript: \(problem?.localizedDescription ?? "")")
     return result
@@ -206,4 +236,3 @@ for phase in ["cancelled", "failed", "completed"] {
 }
 jsCheck("document.getElementById('downloadCounts').textContent === '0/1 files'", "New operation starts with fresh counts")
 print("PASS: WebKit UI, minimum layout, accessibility, stale events, and terminal recovery")
-print("All download tests passed.")

@@ -42,6 +42,9 @@ xcrun swiftc "$ROOT_DIR/GRBrowser.swift" \
     -o "$STAGED_APP/Contents/MacOS/$APP_NAME" \
     -module-cache-path "$BUILD_DIR/ModuleCache" \
     -target "$(uname -m)-apple-macosx13.3" \
+    -framework CoreWLAN \
+    -framework CoreLocation \
+    -framework Security \
     -framework Cocoa \
     -framework WebKit \
     -framework UniformTypeIdentifiers \

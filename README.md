@@ -30,6 +30,11 @@ For development, `make run` still works.
 3. Open the app and hit **CONNECT**
 4. Browse thumbnails, click to preview, select multiple, download as zip
 
+Open **Settings** (⌘,) to choose the download folder and batch format. Downloads
+save directly to that folder. Nearby remembered camera networks appear beside
+**CONNECT**; select one to join its Wi-Fi before connecting to the camera.
+Remove remembered networks with **Forget** in Settings.
+
 ## API Endpoints
 
 Discovered via firmware reverse engineering ([source](https://notes.secretsauce.net/notes/2022/06/16_ricoh-gr-iiix-80211-reverse-engineering.html)):

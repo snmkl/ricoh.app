@@ -22,6 +22,10 @@
     <string>13.3</string>
     <key>NSHighResolutionCapable</key>
     <true/>
+    <key>NSLocationUsageDescription</key>
+    <string>Identify nearby camera Wi-Fi networks so you can remember and reconnect to them.</string>
+    <key>NSLocationWhenInUseUsageDescription</key>
+    <string>Identify nearby camera Wi-Fi networks so you can remember and reconnect to them.</string>
     <key>NSLocalNetworkUsageDescription</key>
     <string>Connect to your Ricoh camera over Wi-Fi to browse and download photos.</string>
     <key>NSAppTransportSecurity</key>

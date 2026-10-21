@@ -1,6 +1,10 @@
 import Cocoa
 import WebKit
 import UniformTypeIdentifiers
+import CoreWLAN
+import CoreLocation
+import Security
+import Darwin
 
 // MARK: - Camera config
 let CAMERA_BASE = "http://192.168.0.1"
@@ -161,6 +165,9 @@ let APP_HTML: String = ###"""
     z-index: 150; font-family: var(--mono); font-size: 11px;
     box-shadow: 0 6px 28px rgba(0,0,0,0.5);
   }
+  [hidden] { display: none !important; }
+  select { color: var(--text); background: var(--surface); border: 1px solid var(--border);
+    border-radius: 5px; padding: 6px; font: 11px var(--mono); max-width: 170px; }
   .download-status {
     position: fixed; bottom: 76px; left: 50%; transform: translateX(-50%);
     width: min(440px, calc(100vw - 32px)); box-sizing: border-box;
@@ -181,7 +188,12 @@ let APP_HTML: String = ###"""
 <header>
   <div class="logo"><span class="logo-dot" id="dot"></span> GR IIIx</div>
   <div class="controls">
+    <select id="networkSelect" aria-label="Wi-Fi network" onpointerdown="appMessage('settings')"
+      onchange="this.title=this.selectedOptions[0]?.textContent || ''">
+      <option value="">Current Wi-Fi — checking…</option>
+    </select>
     <button class="primary" id="connBtn" onclick="doConnect()">CONNECT</button>
+    <button id="settingsButton" onclick="openSettings()" aria-label="Settings" title="Settings (⌘,)">⚙</button>
   </div>
 </header>
 
@@ -239,7 +251,8 @@ let APP_HTML: String = ###"""
 <script>
 const API = 'gr-cam://camera';
 let photos = [], sel = new Set(), lbIdx = 0;
-let downloadId = null, downloadSequence = 0;
+let downloadId = null, downloadSequence = 0, connectionId = null, connectedId = null;
+let appSettings = {folder:'', format:'zip', networks:[], available:[], current:'', notice:''};
 
 function toast(m) {
   const t = document.getElementById('toast');
@@ -253,48 +266,86 @@ function setView(m, b) {
   b.classList.add('active');
 }
 
-async function doConnect() {
-  const btn = document.getElementById('connBtn');
-  btn.disabled = true; btn.textContent = '...';
-  try {
-    const ping = await fetch(`${API}/v1/ping`);
-    if (!ping.ok) throw new Error('Ping failed');
+function appMessage(action, value = {}) {
+  try { window.webkit.messageHandlers.app.postMessage({ action, ...value }); }
+  catch (error) { _appError(error.message); }
+}
 
-    const res = await fetch(`${API}/v1/photos`);
-    const data = await res.json();
-    console.log('Raw:', data);
-
-    photos = [];
-    if (data.dirs) {
-      for (const d of data.dirs)
-        for (const f of (d.files || [])) {
-          const name = typeof f === 'string' ? f : f.name;
-          photos.push({ dir: d.name, file: name });
-        }
-    } else if (Array.isArray(data)) {
-      for (const i of data)
-        photos.push({ dir: i.dir || i.directory || '', file: i.name || i.file });
-    }
-
-    photos.sort((a, b) => b.file.localeCompare(a.file));
-    document.getElementById('dot').classList.add('connected');
-    document.getElementById('status').textContent = `${photos.length} photos`;
-    document.getElementById('selAllBtn').disabled = false;
-    document.getElementById('empty').style.display = 'none';
-    render();
-    toast(`${photos.length} photos`);
-  } catch (e) {
-    console.error(e);
-    toast(`Failed: ${e.message}`);
-    document.getElementById('status').textContent = 'Connection failed';
+let settingsFocus = null;
+function openSettings() {
+  settingsFocus = document.activeElement;
+  appMessage('openSettings');
+}
+function _settingsClosed() { settingsFocus?.focus(); }
+function _appError(message) { toast(message); }
+function _settingsChanged(value) {
+  appSettings = value;
+  const select = document.getElementById('networkSelect');
+  const previous = select.value;
+  const known = value.networks.filter(n => value.available.includes(n.id) && n.id !== value.current);
+  const currentLabel = value.currentName ? `${value.currentName} (current)` :
+    value.wifiConnected === false ? 'No Wi-Fi connection' : 'Current Wi-Fi — name unavailable';
+  const options = [['', currentLabel], ...known.map(n => [n.id, n.name])];
+  const existing = Array.from(select.options, o => [o.value, o.textContent]);
+  if (JSON.stringify(options) !== JSON.stringify(existing)) {
+    select.replaceChildren(...options.map(([id, name]) => new Option(name, id)));
   }
-  btn.disabled = false; btn.textContent = 'CONNECT';
+  select.value = known.some(n => n.id === previous) ? previous : '';
+  select.title = select.selectedOptions[0]?.textContent || '';
+  updateDownloadButtons();
+}
+
+function doConnect() {
+  if (connectionId !== null || downloadId !== null) return;
+  connectionId = `connect-${Date.now()}-${++downloadSequence}`;
+  connectedId = null;
+  photos = []; sel.clear(); closeLb(); updSel();
+  document.getElementById('grid').replaceChildren();
+  document.getElementById('empty').style.display = '';
+  document.querySelector('#empty p').textContent = 'Connecting to camera…';
+  document.getElementById('dot').classList.remove('connected');
+  document.getElementById('selAllBtn').disabled = true;
+  document.getElementById('status').textContent = 'Preparing connection…';
+  appMessage('connect', { id: connectionId, target: document.getElementById('networkSelect').value });
+}
+function _connectionEvent(event) {
+  if (event.phase === 'disconnected' || event.phase === 'remembered') {
+    if (event.id !== connectedId || connectionId !== null) return;
+    document.getElementById('status').textContent = event.message;
+    if (event.phase === 'remembered') return;
+    connectedId = null;
+    photos = []; sel.clear(); closeLb(); updSel();
+    document.getElementById('grid').replaceChildren();
+    document.getElementById('grid').style.display = 'none';
+    document.getElementById('empty').style.display = '';
+    document.querySelector('#empty p').textContent = event.message;
+    document.getElementById('dot').classList.remove('connected');
+    document.getElementById('selAllBtn').disabled = true;
+    updateDownloadButtons();
+    return;
+  }
+  if (connectionId === null || event.id !== connectionId) return;
+  document.getElementById('status').textContent = event.warning ? `${event.message} · ${event.warning}` : event.message;
+  if (['completed', 'failed', 'cancelled'].includes(event.phase)) {
+    connectionId = null;
+    if (event.phase === 'completed') {
+      connectedId = event.id;
+      photos = event.photos;
+      document.getElementById('dot').classList.add('connected');
+      document.getElementById('selAllBtn').disabled = photos.length === 0;
+      document.getElementById('empty').style.display = photos.length ? 'none' : '';
+      document.querySelector('#empty p').textContent = photos.length ? '' : 'No photos on this camera.';
+      render();
+    } else { document.querySelector('#empty p').textContent = event.message; }
+    toast(event.warning || event.message);
+  }
+  updateDownloadButtons();
 }
 
 function thumb(p) { return `${API}/v1/photos/${p.dir}/${p.file}?size=thumb`; }
 function view(p)  { return `${API}/v1/photos/${p.dir}/${p.file}?size=view`; }
 function full(p)  { return `${API}/v1/photos/${p.dir}/${p.file}`; }
-function key(p)   { return `${p.dir}/${p.file}`; }
+function key(p)   { return [p.dir,p.file].filter(Boolean).join('/'); }
 
 function render() {
   const g = document.getElementById('grid');
@@ -346,6 +397,7 @@ function closeLb() { document.getElementById('lb').classList.remove('open'); }
 function navLb(d) { lbIdx = (lbIdx + d + photos.length) % photos.length; openLb(lbIdx); }
 
 document.addEventListener('keydown', e => {
+  if (e.metaKey && e.key === ',') { e.preventDefault(); openSettings(); return; }
   if (!document.getElementById('lb').classList.contains('open')) return;
   if (e.key === 'Escape') closeLb();
   if (e.key === 'ArrowLeft') navLb(-1);
@@ -362,14 +414,17 @@ function dlSelected() {
 }
 
 function updateDownloadButtons() {
+  document.getElementById('connBtn').disabled = downloadId !== null || connectionId !== null;
+  document.getElementById('connBtn').textContent = connectionId !== null ? 'CONNECTING…' : 'CONNECT';
+  document.getElementById('networkSelect').disabled = downloadId !== null || connectionId !== null;
   document.querySelectorAll('[data-download]').forEach(button => {
-    button.disabled = downloadId !== null ||
+    button.disabled = downloadId !== null || connectionId !== null ||
       (button.dataset.download === 'selection' ? sel.size === 0 : !photos[lbIdx]);
   });
 }
 
 function startDownload(files) {
-  if (downloadId !== null || files.length === 0) return;
+  if (downloadId !== null || connectionId !== null || files.length === 0) return;
   downloadId = `${Date.now()}-${++downloadSequence}`;
   updateDownloadButtons();
   _downloadEvent({ id: downloadId, phase: 'preparing', completed: 0,
@@ -394,8 +449,8 @@ function _downloadEvent(event) {
     toast(event.message);
     return;
   }
-  const stages = { preparing: 'Preparing download…', downloading: 'Downloading…',
-    archiving: 'Creating ZIP…', 'awaiting-save': 'Waiting for save location…', saving: 'Saving…' };
+  const stages = { preparing: 'Preparing download folder…', downloading: 'Downloading…',
+    archiving: 'Creating ZIP…', saving: 'Saving…' };
   document.getElementById('downloadStatus').hidden = false;
   const stage = document.getElementById('downloadStage');
   if (stage.textContent !== stages[event.phase]) stage.textContent = stages[event.phase];
@@ -412,9 +467,90 @@ function _downloadEvent(event) {
 }
 
 updateDownloadButtons();
+appMessage('ready');
 </script>
 </body>
 </html>
+"""###
+
+// The settings form lives in its own native modal window, separate from the browser.
+let SETTINGS_HTML: String = ###"""
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root { color-scheme: light dark; font: 13px -apple-system, BlinkMacSystemFont, sans-serif; }
+  * { box-sizing: border-box; }
+  body { margin: 0; padding: 22px 24px; background: #f3f3f3; color: #222; }
+  @media (prefers-color-scheme: dark) { body { background: #252525; color: #eee; } }
+  h2 { font-size: 14px; margin: 0 0 12px; }
+  section + section { border-top: 1px solid #8885; margin-top: 20px; padding-top: 18px; }
+  label { display: block; margin: 16px 0 6px; }
+  button, select { font: inherit; min-height: 26px; }
+  button { padding: 3px 12px; }
+  #folderPath { display: block; font-size: 12px; overflow-wrap: anywhere; margin-bottom: 8px; }
+  .known-network { display: flex; gap: 12px; align-items: center; justify-content: space-between;
+    border-top: 1px solid #8884; padding: 10px 0; }
+  .network-description { min-width: 0; overflow-wrap: anywhere; }
+  small, #networkNotice { opacity: 0.7; font-size: 11px; line-height: 1.5; }
+  #settingsError { color: #d33; font-size: 12px; }
+  footer { display: flex; justify-content: flex-end; margin-top: 18px; }
+</style></head><body>
+<main aria-label="Settings">
+  <section aria-labelledby="downloadsTitle">
+    <h2 id="downloadsTitle">Downloads</h2>
+    <label>Save folder</label><span id="folderPath">Choose a download folder</span>
+    <button id="chooseFolder" onclick="appMessage('folder')">Choose folder…</button>
+    <label for="exportFormat">Default batch format</label>
+    <select id="exportFormat" onchange="appMessage('format', {value:this.value})">
+      <option value="zip">ZIP archive</option><option value="separate">Separate files</option>
+    </select>
+  </section>
+  <section aria-labelledby="networksTitle">
+    <h2 id="networksTitle">Known camera networks</h2>
+    <div id="knownNetworks">No camera networks remembered yet.</div>
+    <p id="networkNotice"></p>
+    <button id="discoverButton" onclick="appMessage('discover')">Enable Wi-Fi discovery…</button>
+  </section>
+  <p id="settingsError" role="alert"></p>
+  <footer><button id="settingsClose" onclick="appMessage('closeSettings')">Close</button></footer>
+</main>
+<script>
+function appMessage(action, value = {}) { window.webkit.messageHandlers.app.postMessage({action, ...value}); }
+function _appError(message) { document.getElementById('settingsError').textContent = message; }
+function _settingsChanged(value) {
+  document.getElementById('folderPath').textContent = value.folder || 'Choose a download folder';
+  document.getElementById('exportFormat').value = value.format;
+  document.getElementById('networkNotice').textContent = value.notice || 'Remembered after a successful camera connection.';
+  document.getElementById('discoverButton').textContent = value.discoveryAllowed ? 'Refresh Wi-Fi discovery' : 'Enable Wi-Fi discovery…';
+  const list = document.getElementById('knownNetworks');
+  const records = JSON.stringify(value.networks);
+  if (list.dataset.records === records) return;
+  list.dataset.records = records;
+  list.replaceChildren();
+  for (const network of value.networks) {
+    const row = document.createElement('div'); row.className = 'known-network';
+    const description = document.createElement('div'); description.className = 'network-description';
+    const name = document.createElement('div'); name.textContent = network.name;
+    const last = document.createElement('small');
+    last.textContent = `Last connected: ${new Date(network.lastConnected * 1000).toLocaleString()}`;
+    description.append(name, last);
+    const forget = document.createElement('button'); forget.textContent = network.forgetting ? 'Forgetting…' : 'Forget';
+    forget.disabled = network.forgetting;
+    forget.setAttribute('aria-label', `Forget ${network.name}`);
+    forget.onclick = () => appMessage('forget', {id:network.id});
+    row.append(description, forget); list.appendChild(row);
+  }
+  if (!value.networks.length) list.textContent = 'No camera networks remembered yet.';
+}
+document.addEventListener('keydown', event => {
+  if (event.key === 'Escape' || (event.metaKey && event.key.toLowerCase() === 'w')) {
+    event.preventDefault(); appMessage('closeSettings');
+  }
+});
+document.getElementById('chooseFolder').focus();
+appMessage('settingsReady');
+</script></body></html>
 """###
 
 // MARK: - Custom URL Scheme Handler
@@ -475,11 +611,820 @@ class CameraSchemeHandler: NSObject, WKURLSchemeHandler {
     }
 }
 
+// MARK: - Native settings and platform services
+
+func appError(_ message: String) -> Error {
+    NSError(domain: "GRBrowser", code: 1, userInfo: [NSLocalizedDescriptionKey: message])
+}
+
+struct CameraNetwork: Equatable {
+    let id: String
+    let name: String
+    let secured: Bool
+    init(name: String, data: Data? = nil, secured: Bool = true) {
+        self.name = name
+        self.id = (data ?? Data(name.utf8)).base64EncodedString()
+        self.secured = secured
+    }
+}
+
+struct KnownCameraNetwork {
+    let network: CameraNetwork
+    let lastConnected: Date
+}
+
+enum ExportFormat: String { case zip, separate }
+
+// Read and changed on the main thread; download operations receive immutable snapshots.
+final class AppPreferences {
+    private let defaults: UserDefaults
+    private let key = "settings.v1"
+    private(set) var format: ExportFormat = .zip
+    private(set) var networks: [KnownCameraNetwork] = []
+    private var folderBookmark: Data?
+    private(set) var revisions: [String: Int] = [:]
+    var onChange: (() -> Void)?
+
+    init(defaults: UserDefaults = .standard) {
+        self.defaults = defaults
+        guard let record = defaults.dictionary(forKey: key), record["version"] as? Int == 1 else { return }
+        format = ExportFormat(rawValue: record["format"] as? String ?? "") ?? .zip
+        folderBookmark = record["folder"] as? Data
+        var seen = Set<String>()
+        for entry in record["networks"] as? [[String: Any]] ?? [] {
+            guard let id = entry["id"] as? String, let data = Data(base64Encoded: id),
+                  !data.isEmpty, data.count <= 32, seen.insert(id).inserted,
+                  let name = entry["name"] as? String, !name.isEmpty,
+                  let time = entry["lastConnected"] as? Double, time.isFinite else { continue }
+            networks.append(KnownCameraNetwork(network: CameraNetwork(name: name, data: data),
+                                                lastConnected: Date(timeIntervalSince1970: time)))
+        }
+        networks.sort { $0.lastConnected > $1.lastConnected }
+    }
+
+    func folder() -> URL? {
+        guard let bookmark = folderBookmark else { return nil }
+        var stale = false
+        guard let url = try? URL(resolvingBookmarkData: bookmark, options: [.withoutUI, .withoutMounting],
+                                 relativeTo: nil, bookmarkDataIsStale: &stale) else { return nil }
+        if stale, let refreshed = try? url.bookmarkData(options: [], includingResourceValuesForKeys: nil, relativeTo: nil) {
+            folderBookmark = refreshed
+            persist(notify: false)
+        }
+        return url
+    }
+
+    static func usableFolder(_ url: URL) -> Bool {
+        var directory: ObjCBool = false
+        return FileManager.default.fileExists(atPath: url.path, isDirectory: &directory)
+            && directory.boolValue && FileManager.default.isWritableFile(atPath: url.path)
+    }
+
+    func setFolder(_ url: URL) throws {
+        guard Self.usableFolder(url) else { throw appError("Choose an available, writable folder.") }
+        folderBookmark = try url.bookmarkData(options: [], includingResourceValuesForKeys: nil, relativeTo: nil)
+        persist()
+    }
+
+    func setFormat(_ value: ExportFormat) { format = value; persist() }
+
+    func remember(_ network: CameraNetwork, at date: Date) {
+        networks.removeAll { $0.network.id == network.id }
+        networks.insert(KnownCameraNetwork(network: network, lastConnected: date), at: 0)
+        persist()
+    }
+
+    func invalidateHistory(for id: String) { revisions[id, default: 0] += 1 }
+    func forget(_ id: String) { networks.removeAll { $0.network.id == id }; persist() }
+
+    private func persist(notify: Bool = true) {
+        var record: [String: Any] = ["version": 1, "format": format.rawValue,
+            "networks": networks.map { ["id": $0.network.id, "name": $0.network.name,
+                                        "lastConnected": $0.lastConnected.timeIntervalSince1970] }]
+        record["folder"] = folderBookmark
+        defaults.set(record, forKey: key)
+        if notify { onChange?() }
+    }
+}
+
+func pickDownloadFolder(window: NSWindow?, initial: URL?, completion: @escaping (URL?) -> Void) {
+    guard window?.attachedSheet == nil else { completion(nil); return }
+    let panel = NSOpenPanel()
+    panel.title = "Choose download folder"
+    panel.prompt = "Choose"
+    panel.canChooseDirectories = true
+    panel.canChooseFiles = false
+    panel.canCreateDirectories = true
+    panel.allowsMultipleSelection = false
+    panel.directoryURL = initial
+    let respond: (NSApplication.ModalResponse) -> Void = { completion($0 == .OK ? panel.url : nil) }
+    if let window = window { panel.beginSheetModal(for: window, completionHandler: respond) }
+    else { panel.begin(completionHandler: respond) }
+}
+
+protocol WiFiAccess {
+    func current() -> CameraNetwork?
+    func scan() throws -> [CameraNetwork]
+    func join(_ network: CameraNetwork, password: String?) throws
+    func ready(on network: CameraNetwork?) -> Bool
+}
+
+final class MacWiFi: WiFiAccess {
+    private var scanned: [String: CWNetwork] = [:]
+    private func interface() -> CWInterface? { CWWiFiClient.shared().interface() }
+    func current() -> CameraNetwork? {
+        guard let interface = interface(), interface.powerOn() else { return nil }
+        return Self.network(name: interface.ssid(), data: interface.ssidData(), secured: interface.security() != .none)
+    }
+    static func network(name: String?, data: Data?, secured: Bool) -> CameraNetwork? {
+        // CoreWLAN can expose one representation before the other after association/authorization.
+        guard let bytes = data ?? name.map({ Data($0.utf8) }), !bytes.isEmpty,
+              let display = name ?? String(data: bytes, encoding: .utf8), !display.isEmpty else { return nil }
+        return CameraNetwork(name: display, data: bytes, secured: secured)
+    }
+    func scan() throws -> [CameraNetwork] {
+        guard let interface = interface(), interface.powerOn() else { throw appError("Wi-Fi is off or unavailable.") }
+        scanned = [:]
+        var found: [CameraNetwork] = []
+        for network in try interface.scanForNetworks(withSSID: nil) {
+            guard let value = Self.network(name: network.ssid, data: network.ssidData,
+                                          secured: !network.supportsSecurity(.none)) else { continue }
+            if scanned[value.id] == nil { found.append(value) }
+            scanned[value.id] = network
+        }
+        return found
+    }
+    func join(_ network: CameraNetwork, password: String?) throws {
+        guard let interface = interface(), let target = scanned[network.id] else {
+            throw appError("The selected network is no longer nearby.")
+        }
+        do { try interface.associate(to: target, password: password) }
+        catch { throw appError("Could not join the selected Wi-Fi. Check its password and try again.") }
+    }
+    func ready(on network: CameraNetwork?) -> Bool {
+        guard let interface = interface(), interface.powerOn(), let name = interface.interfaceName else { return false }
+        if let network = network, current()?.id != network.id { return false }
+        var addresses: UnsafeMutablePointer<ifaddrs>?
+        guard getifaddrs(&addresses) == 0 else { return false }
+        defer { freeifaddrs(addresses) }
+        var address = addresses
+        while let item = address {
+            defer { address = item.pointee.ifa_next }
+            guard String(cString: item.pointee.ifa_name) == name,
+                  let socket = item.pointee.ifa_addr, socket.pointee.sa_family == UInt8(AF_INET) else { continue }
+            let ip = UnsafeRawPointer(socket).assumingMemoryBound(to: sockaddr_in.self).pointee.sin_addr.s_addr
+            if ip != 0 { return true }
+        }
+        return false
+    }
+}
+
+protocol WiFiAuthorization: AnyObject {
+    var allowed: Bool { get }
+    func request(_ completion: @escaping (Bool) -> Void)
+}
+
+final class MacWiFiAuthorization: NSObject, WiFiAuthorization, CLLocationManagerDelegate {
+    private let manager = CLLocationManager()
+    private var callbacks: [(Bool) -> Void] = []
+    override init() { super.init(); manager.delegate = self }
+    var allowed: Bool {
+        CLLocationManager.locationServicesEnabled() &&
+            manager.authorizationStatus == .authorizedAlways
+    }
+    func request(_ completion: @escaping (Bool) -> Void) {
+        guard manager.authorizationStatus == .notDetermined, CLLocationManager.locationServicesEnabled() else {
+            completion(allowed); return
+        }
+        callbacks.append(completion)
+        guard callbacks.count == 1 else { return }
+        manager.requestWhenInUseAuthorization()
+        // An unanswered permission dialog must not indefinitely block manual camera access.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 15) { self.respond() }
+    }
+    func locationManagerDidChangeAuthorization(_ manager: CLLocationManager) {
+        if manager.authorizationStatus != .notDetermined { respond() }
+    }
+    private func respond() {
+        let pending = callbacks; callbacks = []
+        pending.forEach { $0(allowed) }
+    }
+}
+
+protocol CameraCredentials {
+    func password(for id: String) throws -> String?
+    func save(_ password: String, for id: String) throws
+    func remove(_ id: String) throws
+}
+
+// Read-only access to macOS-owned Wi-Fi credentials; writes/deletion stay app-owned.
+protocol SavedWiFiCredentials {
+    func password(for id: String) throws -> String?
+}
+
+enum SavedWiFiCredentialError: Error { case cancelled }
+
+final class MacWiFiCredentials: SavedWiFiCredentials {
+    typealias Lookup = (CWKeychainDomain, Data) -> (OSStatus, String?)
+    private let lookup: Lookup
+    init(lookup: @escaping Lookup = MacWiFiCredentials.lookup) { self.lookup = lookup }
+
+    private static func lookup(_ domain: CWKeychainDomain, _ ssid: Data) -> (OSStatus, String?) {
+        var password: NSString?
+        let status = CWKeychainFindWiFiPassword(domain, ssid, &password)
+        return (status, password as String?)
+    }
+
+    func password(for id: String) throws -> String? {
+        guard let ssid = Data(base64Encoded: id), !ssid.isEmpty, ssid.count <= 32 else {
+            throw appError("The selected Wi-Fi identity is invalid.")
+        }
+        for domain in [CWKeychainDomain.user, .system] {
+            let (status, password) = lookup(domain, ssid)
+            if status == errSecSuccess, let password = password, !password.isEmpty { return password }
+            if status == errSecUserCanceled { throw SavedWiFiCredentialError.cancelled }
+            // No saved item: try the other domain. Denied/locked/unavailable access:
+            // fall back to app-owned credentials without another macOS access request.
+            if status != errSecItemNotFound && status != errSecSuccess { return nil }
+        }
+        return nil
+    }
+}
+
+final class KeychainCameraCredentials: CameraCredentials {
+    private let service: String
+    init(service: String = "local.GRBrowser.camera-wifi") { self.service = service }
+    private func query(_ id: String) -> [String: Any] {
+        [kSecClass as String: kSecClassGenericPassword, kSecAttrService as String: service,
+         kSecAttrAccount as String: id]
+    }
+    private func check(_ status: OSStatus) throws {
+        guard status == errSecSuccess else { throw appError("Camera password Keychain access failed (\(status)).") }
+    }
+    func password(for id: String) throws -> String? {
+        var request = query(id)
+        request[kSecReturnData as String] = true
+        request[kSecMatchLimit as String] = kSecMatchLimitOne
+        var item: CFTypeRef?
+        let status = SecItemCopyMatching(request as CFDictionary, &item)
+        if status == errSecItemNotFound { return nil }
+        try check(status)
+        guard let data = item as? Data, let value = String(data: data, encoding: .utf8) else {
+            throw appError("The stored camera password cannot be read.")
+        }
+        return value
+    }
+    func save(_ password: String, for id: String) throws {
+        let attributes = [kSecValueData as String: Data(password.utf8)]
+        let status = SecItemUpdate(query(id) as CFDictionary, attributes as CFDictionary)
+        if status == errSecItemNotFound {
+            var item = query(id)
+            item[kSecValueData as String] = Data(password.utf8)
+            try check(SecItemAdd(item as CFDictionary, nil))
+        } else { try check(status) }
+    }
+    func remove(_ id: String) throws {
+        let status = SecItemDelete(query(id) as CFDictionary)
+        if status != errSecItemNotFound { try check(status) }
+    }
+}
+
+struct CameraPhoto { let dir: String; let file: String }
+protocol CameraVerification {
+    func verify(_ completion: @escaping (Result<[CameraPhoto], Error>) -> Void)
+    func ping(_ completion: @escaping (Result<Void, Error>) -> Void)
+    func cancel()
+}
+
+extension CameraVerification {
+    func ping(_ completion: @escaping (Result<Void, Error>) -> Void) {
+        verify { completion($0.map { _ in () }) }
+    }
+}
+
+final class HTTPCameraVerification: CameraVerification {
+    private let base: URL
+    private let session: URLSession
+    private var generation = UUID()
+    private var task: URLSessionDataTask?
+    init(base: URL = URL(string: CAMERA_BASE)!) {
+        self.base = base
+        let config = URLSessionConfiguration.ephemeral
+        config.timeoutIntervalForRequest = 4
+        config.timeoutIntervalForResource = 8
+        session = URLSession(configuration: config)
+    }
+    func cancel() { generation = UUID(); task?.cancel(); task = nil }
+    func ping(_ completion: @escaping (Result<Void, Error>) -> Void) {
+        cancel()
+        request("v1/ping", token: generation) { completion($0.map { _ in () }) }
+    }
+    func verify(_ completion: @escaping (Result<[CameraPhoto], Error>) -> Void) {
+        cancel()
+        let token = generation
+        request("v1/ping", token: token) { result in
+            switch result {
+            case .failure(let error): completion(.failure(error))
+            case .success:
+                self.request("v1/photos", token: token) { result in
+                    completion(result.flatMap { data in
+                        Result {
+                            do { return try Self.photos(from: data) }
+                            catch { throw appError("Camera returned an invalid photo list.") }
+                        }
+                    })
+                }
+            }
+        }
+    }
+    private func request(_ path: String, token: UUID, completion: @escaping (Result<Data, Error>) -> Void) {
+        var request = URLRequest(url: base.appendingPathComponent(path))
+        request.setValue("GRBrowser/1.0", forHTTPHeaderField: "User-Agent")
+        task = session.dataTask(with: request) { data, response, error in
+            DispatchQueue.main.async {
+                guard self.generation == token else { return }
+                guard error == nil, let response = response as? HTTPURLResponse,
+                      (200...299).contains(response.statusCode), let data = data else {
+                    completion(.failure(appError(path == "v1/ping" ? "Camera is unavailable." : "Could not load camera photos.")))
+                    return
+                }
+                completion(.success(data))
+            }
+        }
+        task?.resume()
+    }
+    static func photos(from data: Data) throws -> [CameraPhoto] {
+        let json = try JSONSerialization.jsonObject(with: data)
+        var photos: [CameraPhoto] = []
+        func append(_ value: Any, directory: String) throws {
+            let filename = value as? String ?? (value as? [String: Any])?["name"] as? String
+            guard let filename = filename, !filename.isEmpty else { throw appError("Invalid camera photo list.") }
+            photos.append(CameraPhoto(dir: directory, file: filename))
+        }
+        if let dictionary = json as? [String: Any], let dirs = dictionary["dirs"] as? [[String: Any]] {
+            for dir in dirs {
+                guard let name = dir["name"] as? String, let files = dir["files"] as? [Any] else {
+                    throw appError("Invalid camera photo list.")
+                }
+                for file in files { try append(file, directory: name) }
+            }
+        } else if let list = json as? [[String: Any]] {
+            for item in list {
+                guard let name = item["name"] as? String ?? item["file"] as? String else {
+                    throw appError("Invalid camera photo list.")
+                }
+                try append(name, directory: item["dir"] as? String ?? item["directory"] as? String ?? "")
+            }
+        } else { throw appError("Invalid camera photo list.") }
+        return photos.sorted { $0.file > $1.file }
+    }
+}
+
+// Main-thread lifecycle; blocking Wi-Fi and Keychain calls run on the serial worker.
+final class CameraConnection {
+    let preferences: AppPreferences
+    private let wifi: WiFiAccess
+    private let authorization: WiFiAuthorization
+    private let credentials: CameraCredentials
+    private let savedCredentials: SavedWiFiCredentials
+    private let camera: CameraVerification
+    private let health: CameraVerification
+    private let worker = DispatchQueue(label: "GRBrowser.wifi", qos: .userInitiated)
+    private let now: () -> Date
+    private let later: (TimeInterval, @escaping () -> Void) -> Void
+    private let timeout: TimeInterval
+    private var attempt: Attempt?
+    private var session: Session?
+    private var healthCheck: UUID?
+    private var scanGeneration = 0
+    private var scanning = false
+    private var checkingCurrent = false
+    private var nextDiscovery = Date.distantPast
+    private var forgetting = Set<String>()
+    private(set) var nearby: [CameraNetwork] = []
+    private(set) var currentNetwork: CameraNetwork?
+    private var wifiReady: Bool?
+    var currentID: String? { currentNetwork?.id }
+    private(set) var notice = "Enable Wi-Fi discovery to remember and reconnect to camera networks."
+    var onChange: (() -> Void)?
+    var onEvent: (([String: Any]) -> Void)?
+    var canConnect: () -> Bool = { true }
+    var passwordPrompt: (String, @escaping ((String, Bool)?) -> Void) -> Void = { _, done in done(nil) }
+    var isConnecting: Bool { attempt != nil }
+    var isConnected: Bool { session != nil }
+
+    // The app timer also discovers remembered networks that appear after the initial scan.
+    // Permission requests remain explicit; polling never prompts or switches Wi-Fi.
+    func poll(discover: Bool = true) {
+        checkConnection()
+        if discover { refreshCurrentNetwork() }
+        if discover, !preferences.networks.isEmpty, authorization.allowed, now() >= nextDiscovery { refresh() }
+    }
+
+    // Reading the current interface does not scan or change Wi-Fi and remains safe during downloads.
+    func refreshCurrentNetwork() {
+        guard !checkingCurrent, !isConnecting else { return }
+        checkingCurrent = true
+        let generation = scanGeneration
+        let allowed = authorization.allowed
+        worker.async {
+            let network = allowed ? self.wifi.current() : nil
+            let ready = self.wifi.ready(on: nil)
+            DispatchQueue.main.async {
+                self.checkingCurrent = false
+                guard self.scanGeneration == generation, !self.isConnecting else { return }
+                var changed = self.setCurrent(network, ready: ready)
+                if !allowed, !self.nearby.isEmpty { self.nearby = []; changed = true }
+                if changed { self.onChange?() }
+            }
+        }
+    }
+
+    @discardableResult private func setCurrent(_ network: CameraNetwork?, ready: Bool) -> Bool {
+        let changed = currentNetwork != network || wifiReady != ready
+        currentNetwork = network; wifiReady = ready
+        return changed
+    }
+
+    private final class Session {
+        let id: String
+        let revisions: [String: Int]
+        let photoCount: Int
+        var network: CameraNetwork?
+        init(job: Attempt, photoCount: Int) {
+            id = job.id; revisions = job.revisions; network = job.initial; self.photoCount = photoCount
+        }
+    }
+
+    private final class Attempt {
+        let id: String
+        let target: String?
+        let revisions: [String: Int]
+        var initial: CameraNetwork?
+        var pendingPassword: String?
+        var triedPasswords = Set<String>()
+        var verified = false
+        var lastFailure: Error?
+        var waitingForNetwork = false
+        init(id: String, target: String?, revisions: [String: Int]) {
+            self.id = id; self.target = target; self.revisions = revisions
+        }
+    }
+
+    init(preferences: AppPreferences, wifi: WiFiAccess = MacWiFi(),
+         authorization: WiFiAuthorization = MacWiFiAuthorization(),
+         credentials: CameraCredentials = KeychainCameraCredentials(),
+         savedCredentials: SavedWiFiCredentials = MacWiFiCredentials(),
+         camera: CameraVerification = HTTPCameraVerification(),
+         health: CameraVerification = HTTPCameraVerification(), timeout: TimeInterval = 15,
+         now: @escaping () -> Date = Date.init,
+         later: @escaping (TimeInterval, @escaping () -> Void) -> Void = { delay, work in
+             DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
+         }) {
+        self.preferences = preferences; self.wifi = wifi; self.authorization = authorization
+        self.credentials = credentials; self.savedCredentials = savedCredentials
+        self.camera = camera; self.health = health; self.timeout = timeout
+        self.now = now; self.later = later
+    }
+
+    // Poll local Wi-Fi and the camera, including when SSID access is denied. No internet is required.
+    func checkConnection() {
+        guard let connected = session, !isConnecting, healthCheck == nil else { return }
+        let token = UUID()
+        healthCheck = token
+        let allowed = authorization.allowed
+        worker.async {
+            let ready = self.wifi.ready(on: nil)
+            let network = allowed ? self.wifi.current() : nil
+            DispatchQueue.main.async {
+                guard self.session === connected, self.healthCheck == token else { return }
+                if self.setCurrent(network, ready: ready) { self.onChange?() }
+                guard ready, connected.network == nil || network == nil || connected.network?.id == network?.id else {
+                    self.disconnected(connected); return
+                }
+                let needsIdentity = connected.network == nil && network != nil
+                let respond: (Result<Void, Error>) -> Void = { result in
+                    guard self.session === connected, self.healthCheck == token else { return }
+                    guard case .success = result else { self.disconnected(connected); return }
+                    // Confirm identity around a fresh full verification before learning a late SSID.
+                    self.worker.async {
+                        let final = allowed ? self.wifi.current() : nil
+                        DispatchQueue.main.async {
+                            guard self.session === connected, self.healthCheck == token else { return }
+                            self.healthCheck = nil
+                            if let network = network, let final = final, network.id != final.id {
+                                self.disconnected(connected); return
+                            }
+                            if needsIdentity, let network = network, final?.id == network.id {
+                                connected.network = network
+                                if self.preferences.revisions[network.id, default: 0] == connected.revisions[network.id, default: 0] {
+                                    self.remember(network)
+                                    self.notice = ""
+                                    self.onChange?()
+                                    self.onEvent?(["id": connected.id, "phase": "remembered", "message": "\(connected.photoCount) photos"])
+                                }
+                            }
+                        }
+                    }
+                }
+                if needsIdentity { self.health.verify { respond($0.map { _ in () }) } }
+                else { self.health.ping(respond) }
+            }
+        }
+    }
+
+    private func disconnected(_ connected: Session) {
+        guard session === connected else { return }
+        session = nil; healthCheck = nil; health.cancel()
+        scanGeneration += 1
+        nearby = []
+        onChange?()
+        onEvent?(["id": connected.id, "phase": "disconnected", "message": "Camera disconnected. Check Wi-Fi and connect again."])
+    }
+
+    private func remember(_ network: CameraNetwork) {
+        setCurrent(network, ready: true)
+        if !nearby.contains(where: { $0.id == network.id }) { nearby.append(network) }
+        preferences.remember(network, at: now())
+    }
+
+    func refresh(requestAuthorization: Bool = false) {
+        if requestAuthorization {
+            authorization.request { [weak self] _ in self?.refresh() }; return
+        }
+        guard authorization.allowed else {
+            nearby = []; currentNetwork = nil
+            notice = "Allow GRBrowser in System Settings → Privacy & Security → Location Services to discover Wi-Fi names. Current Wi-Fi connection still works."
+            refreshCurrentNetwork()
+            onChange?(); return
+        }
+        guard !scanning, !isConnecting, canConnect() else { return }
+        nextDiscovery = now().addingTimeInterval(10)
+        scanning = true; scanGeneration += 1
+        let generation = scanGeneration
+        worker.async {
+            let result = Result { try self.wifi.scan() }
+            let current = self.wifi.current()
+            let ready = self.wifi.ready(on: nil)
+            DispatchQueue.main.async {
+                self.scanning = false
+                guard self.scanGeneration == generation, !self.isConnecting else { return }
+                self.setCurrent(current, ready: ready)
+                switch result {
+                case .success(let networks): self.nearby = networks; self.notice = ""
+                case .failure: self.nearby = []; self.notice = "Wi-Fi discovery unavailable. Use Current Wi-Fi or refresh discovery."
+                }
+                self.onChange?()
+            }
+        }
+    }
+
+    func connect(id: String, target: String?) {
+        precondition(Thread.isMainThread)
+        guard !isConnecting, canConnect(), !id.isEmpty else { return }
+        session = nil; healthCheck = nil; health.cancel()
+        scanGeneration += 1
+        let job = Attempt(id: id, target: target, revisions: preferences.revisions)
+        attempt = job
+        if let target = target, !preferences.networks.contains(where: { $0.network.id == target }) {
+            finish(job, error: appError("That camera network was forgotten.")); return
+        }
+        event(job, phase: "preparing", message: "Preparing connection…")
+        authorization.request { allowed in
+            guard self.attempt === job else { return }
+            self.begin(job, allowed: allowed)
+        }
+    }
+
+    private func begin(_ job: Attempt, allowed: Bool) {
+        notice = allowed ? "" : "Wi-Fi names need Location Services access. Current Wi-Fi connection still works."
+        if !allowed { nearby = []; currentNetwork = nil }
+        onChange?()
+        worker.async {
+            let initial = allowed ? self.wifi.current() : nil
+            let result = Result { () -> CameraNetwork? in
+                guard let target = job.target else { return nil }
+                guard allowed else { throw appError("Allow Location Services to reconnect, or choose Current Wi-Fi.") }
+                guard let network = try self.wifi.scan().first(where: { $0.id == target }) else {
+                    throw appError("The selected camera Wi-Fi is no longer nearby.")
+                }
+                return network
+            }
+            DispatchQueue.main.async {
+                guard self.attempt === job else { return }
+                job.initial = initial
+                if let initial = initial { self.setCurrent(initial, ready: true); self.onChange?() }
+                switch result {
+                case .failure(let error): self.finish(job, error: error)
+                case .success(let network):
+                    if let network = network, initial?.id != network.id { self.obtainPassword(job, network: network) }
+                    else { self.startVerification(job, network: network ?? initial, waitForNetwork: false) }
+                }
+            }
+        }
+    }
+
+    private enum CredentialSource { case macOS, app, manual }
+
+    private func obtainPassword(_ job: Attempt, network: CameraNetwork, source: CredentialSource = .macOS) {
+        guard network.secured else { join(job, network: network, password: nil); return }
+        guard source != .manual else {
+            event(job, phase: "credentials", message: job.lastFailure == nil ? "Waiting for Wi-Fi password…"
+                : "Saved password could not connect. Enter the camera Wi-Fi password…")
+            passwordPrompt(network.name) { answer in
+                guard self.attempt === job else { return }
+                guard let (password, remember) = answer else {
+                    self.finish(job, phase: "cancelled", message: "Connection cancelled"); return
+                }
+                job.pendingPassword = remember ? password : nil
+                self.join(job, network: network, password: password)
+            }
+            return
+        }
+        event(job, phase: "credentials", message: source == .macOS
+            ? "Checking saved macOS Wi-Fi password. Keychain access may need approval…"
+            : "Checking GRBrowser's saved Wi-Fi password…")
+        let next: CredentialSource = source == .macOS ? .app : .manual
+        worker.async {
+            let result = Result { try source == .macOS ? self.savedCredentials.password(for: network.id)
+                                                     : self.credentials.password(for: network.id) }
+            DispatchQueue.main.async {
+                guard self.attempt === job else { return }
+                switch result {
+                case .failure(SavedWiFiCredentialError.cancelled):
+                    self.finish(job, phase: "cancelled", message: "Keychain access cancelled")
+                case .failure(let error): self.finish(job, error: error)
+                case .success(let password?) where job.triedPasswords.insert(password).inserted:
+                    self.join(job, network: network, password: password) {
+                        self.obtainPassword(job, network: network, source: next)
+                    }
+                case .success: self.obtainPassword(job, network: network, source: next)
+                }
+            }
+        }
+    }
+
+    private func join(_ job: Attempt, network: CameraNetwork, password: String?, fallback: (() -> Void)? = nil) {
+        event(job, phase: "joining", message: "Joining \(network.name)…")
+        worker.async {
+            let result = Result { try self.wifi.join(network, password: password) }
+            DispatchQueue.main.async {
+                guard self.attempt === job else { return }
+                switch result {
+                case .failure(let error):
+                    if let fallback = fallback { job.lastFailure = error; fallback() }
+                    else { self.finish(job, error: error) }
+                case .success:
+                    job.lastFailure = nil
+                    job.initial = network
+                    self.startVerification(job, network: network, waitForNetwork: true)
+                }
+            }
+        }
+    }
+
+    private func startVerification(_ job: Attempt, network: CameraNetwork?, waitForNetwork: Bool) {
+        // User prompts are outside this bounded network/camera readiness interval.
+        let deadline = now().addingTimeInterval(timeout)
+        later(timeout) {
+            if self.attempt === job && !job.verified {
+                let fallback = job.waitingForNetwork ? "Wi-Fi joined but its local network did not become ready."
+                    : "Camera connection timed out. Check camera Wi-Fi and try again."
+                self.finish(job, error: job.lastFailure ?? appError(fallback))
+            }
+        }
+        job.waitingForNetwork = waitForNetwork
+        func checkReadiness() {
+            guard self.attempt === job else { return }
+            if !waitForNetwork { self.verify(job, deadline: deadline); return }
+            self.event(job, phase: "waiting", message: "Waiting for camera Wi-Fi…")
+            self.worker.async {
+                let ready = self.wifi.ready(on: network)
+                DispatchQueue.main.async {
+                    guard self.attempt === job else { return }
+                    if ready { self.verify(job, deadline: deadline) }
+                    else if self.now() < deadline { self.later(0.25, checkReadiness) }
+                    else { self.finish(job, error: appError("Wi-Fi did not become ready.")) }
+                }
+            }
+        }
+        checkReadiness()
+    }
+
+    private func verify(_ job: Attempt, deadline: Date) {
+        job.waitingForNetwork = false
+        event(job, phase: "camera", message: "Connecting to camera…")
+        camera.verify { result in
+            guard self.attempt === job else { return }
+            switch result {
+            case .failure(let error):
+                job.lastFailure = error
+                if self.now() < deadline { self.later(0.75) { if self.attempt === job { self.verify(job, deadline: deadline) } } }
+                else { self.finish(job, error: error) }
+            case .success(let photos):
+                let allowed = self.authorization.allowed
+                self.worker.async {
+                    let final = allowed ? self.wifi.current() : nil
+                    DispatchQueue.main.async {
+                        guard self.attempt === job else { return }
+                        guard job.target == nil || final?.id == job.target else {
+                            self.finish(job, error: appError("Wi-Fi changed before camera verification finished.")); return
+                        }
+                        if job.initial == nil, let final = final, self.now() < deadline {
+                            job.initial = final
+                            self.verify(job, deadline: deadline)
+                            return
+                        }
+                        if let initial = job.initial, let final = final, initial.id != final.id {
+                            self.finish(job, error: appError("Wi-Fi changed before camera verification finished.")); return
+                        }
+                        job.verified = true
+                        let stable = final != nil && final?.id == job.initial?.id
+                        let forgotten = final.map { self.preferences.revisions[$0.id, default: 0] != job.revisions[$0.id, default: 0] } ?? false
+                        if stable, !forgotten, let network = final {
+                            self.remember(network)
+                        }
+                        if !stable { job.initial = nil }
+                        if stable, !forgotten, let password = job.pendingPassword, let final = final {
+                            self.worker.async {
+                                let result = Result { try self.credentials.save(password, for: final.id) }
+                                DispatchQueue.main.async {
+                                    guard self.attempt === job else { return }
+                                    // Forget can run while a credential write is queued; serialize deletion after it.
+                                    if case .failure(let error) = result { self.complete(job, photos: photos, warning: error.localizedDescription) }
+                                    else { self.complete(job, photos: photos) }
+                                }
+                            }
+                        } else { self.complete(job, photos: photos) }
+                    }
+                }
+            }
+        }
+    }
+
+    private func complete(_ job: Attempt, photos: [CameraPhoto], warning: String? = nil) {
+        session = Session(job: job, photoCount: photos.count)
+        var value: [String: Any] = ["photos": photos.map { ["dir": $0.dir, "file": $0.file] }]
+        let identityWarning = job.initial == nil ? (authorization.allowed
+            ? "Wi-Fi name unavailable; network not remembered yet."
+            : "Network not remembered. Allow GRBrowser in System Settings → Privacy & Security → Location Services.") : nil
+        if let identityWarning = identityWarning { notice = identityWarning }
+        value["warning"] = [warning, identityWarning].compactMap { $0 }.joined(separator: " ")
+        finish(job, phase: "completed", message: "\(photos.count) photos", extra: value)
+        onChange?()
+    }
+
+    func forget(_ id: String) {
+        guard preferences.networks.contains(where: { $0.network.id == id }), forgetting.insert(id).inserted else { return }
+        preferences.invalidateHistory(for: id)
+        onChange?()
+        worker.async {
+            let result = Result { try self.credentials.remove(id) }
+            DispatchQueue.main.async {
+                self.forgetting.remove(id)
+                switch result {
+                case .success: self.preferences.forget(id)
+                case .failure(let error): self.notice = error.localizedDescription
+                }
+                self.onChange?()
+            }
+        }
+    }
+
+    func settingsValue() -> [String: Any] {
+        ["folder": preferences.folder()?.path ?? "", "format": preferences.format.rawValue,
+         "networks": preferences.networks.map { ["id": $0.network.id, "name": $0.network.name,
+             "lastConnected": $0.lastConnected.timeIntervalSince1970, "forgetting": forgetting.contains($0.network.id)] },
+         "available": nearby.map { $0.id }, "current": currentID ?? "", "notice": notice,
+         "currentName": currentNetwork?.name ?? "", "wifiConnected": wifiReady.map { $0 as Any } ?? NSNull(),
+         "discoveryAllowed": authorization.allowed]
+    }
+
+    private func event(_ job: Attempt, phase: String, message: String) {
+        guard attempt === job else { return }
+        onEvent?(["id": job.id, "phase": phase, "message": message])
+    }
+    private func finish(_ job: Attempt, error: Error) { finish(job, phase: "failed", message: error.localizedDescription) }
+    private func finish(_ job: Attempt, phase: String, message: String, extra: [String: Any] = [:]) {
+        guard attempt === job else { return }
+        camera.cancel()
+        job.pendingPassword = nil
+        job.triedPasswords.removeAll()
+        attempt = nil
+        var value = extra
+        value.merge(["id": job.id, "phase": phase, "message": message]) { _, new in new }
+        onEvent?(value)
+    }
+}
+
 // MARK: - Download Handler
 // Receives download requests from JS, fetches from camera, saves via NSSavePanel
 
 class DownloadHandler: NSObject, WKScriptMessageHandler, URLSessionDownloadDelegate, @unchecked Sendable {
     weak var webView: WKWebView?
+    let preferences: AppPreferences
+    var canStart: () -> Bool = { true }
+    var isDownloading: Bool { activeRequestID != nil }
     // Main-thread admission guard also rejects requests queued during a disk write.
     private var activeRequestID: String?
 
@@ -501,6 +1446,9 @@ class DownloadHandler: NSObject, WKScriptMessageHandler, URLSessionDownloadDeleg
         let id: String
         let files: [String]
         let directory: URL
+        let format: ExportFormat
+        var destination: URL?
+        var stagedFiles: [URL] = []
         var photosDirectory: URL { directory.appendingPathComponent("Photos", isDirectory: true) }
         var completed = 0
         var phase = "preparing"
@@ -508,16 +1456,18 @@ class DownloadHandler: NSObject, WKScriptMessageHandler, URLSessionDownloadDeleg
         var stagedFile: URL?
         var filename: String { (files[min(completed, files.count - 1)] as NSString).lastPathComponent }
 
-        init(id: String, files: [String], directory: URL) {
+        init(id: String, files: [String], directory: URL, format: ExportFormat) {
             self.id = id
             self.files = files
             self.directory = directory
+            self.format = format
         }
     }
 
-    init(cameraBase: URL = URL(string: CAMERA_BASE)!,
+    init(preferences: AppPreferences = AppPreferences(), cameraBase: URL = URL(string: CAMERA_BASE)!,
          temporaryDirectory: URL = FileManager.default.temporaryDirectory,
          archiveExecutable: URL = URL(fileURLWithPath: "/usr/bin/ditto")) {
+        self.preferences = preferences
         self.cameraBase = cameraBase
         self.temporaryDirectory = temporaryDirectory
         self.archiveExecutable = archiveExecutable
@@ -536,28 +1486,15 @@ class DownloadHandler: NSObject, WKScriptMessageHandler, URLSessionDownloadDeleg
 
     func startDownload(id: String, files: [String]) {
         precondition(Thread.isMainThread)
-        guard activeRequestID == nil, !id.isEmpty, !files.isEmpty else { return }
+        guard activeRequestID == nil, canStart(), !id.isEmpty, !files.isEmpty else { return }
         activeRequestID = id
+        let format = preferences.format
         queue.addOperation {
-            guard self.operation == nil else { return }
             let job = DownloadOperation(id: id, files: files,
-                directory: self.temporaryDirectory.appendingPathComponent("GRBrowser-\(UUID().uuidString)"))
+                directory: self.temporaryDirectory.appendingPathComponent("GRBrowser-\(UUID().uuidString)"), format: format)
             self.operation = job
             self.emit(job, phase: "preparing")
-            do {
-                guard files.allSatisfy({ file in
-                    !file.hasPrefix("/") && file.split(separator: "/", omittingEmptySubsequences: false)
-                        .allSatisfy { !$0.isEmpty && $0 != "." && $0 != ".." }
-                }) else { throw self.failure("Invalid camera file path") }
-                try FileManager.default.createDirectory(at: job.photosDirectory, withIntermediateDirectories: true)
-                let configuration = URLSessionConfiguration.ephemeral
-                configuration.timeoutIntervalForRequest = 30
-                configuration.timeoutIntervalForResource = 600
-                self.session = URLSession(configuration: configuration, delegate: self, delegateQueue: self.queue)
-                self.downloadNext(job)
-            } catch {
-                self.finish(job, phase: "failed", message: "Download failed: \(error.localizedDescription)")
-            }
+            DispatchQueue.main.async { self.resolveDestination(job) }
         }
     }
 
@@ -617,6 +1554,7 @@ class DownloadHandler: NSObject, WKScriptMessageHandler, URLSessionDownloadDeleg
             return
         }
         let filename = job.filename
+        job.stagedFiles.append(stagedFile)
         job.completed += 1
         emit(job, phase: "downloading", fraction: Double(job.completed) / Double(job.files.count),
              filename: filename)
@@ -624,43 +1562,110 @@ class DownloadHandler: NSObject, WKScriptMessageHandler, URLSessionDownloadDeleg
         if job.completed < job.files.count {
             downloadNext(job)
         } else {
-            prepareSave(job, singleFile: stagedFile)
+            prepareSave(job)
         }
     }
 
-    private func prepareSave(_ job: DownloadOperation, singleFile: URL) {
+    private func prepareSave(_ job: DownloadOperation) {
+        var saved = 0
         do {
-            let source: URL
-            if job.files.count == 1 {
-                source = singleFile
-            } else {
+            guard let directory = job.destination else { throw failure("No download folder selected") }
+            let sources: [URL]
+            if job.files.count > 1 && job.format == .zip {
                 emit(job, phase: "archiving")
-                source = job.directory.appendingPathComponent("GRIIIx_\(dateStr()).zip")
-                try createArchive(photos: job.photosDirectory, destination: source)
+                let archive = job.directory.appendingPathComponent("GRIIIx_\(dateStr()).zip")
+                do { try createArchive(photos: job.photosDirectory, destination: archive) }
+                catch { throw failure("ZIP failed: \(error.localizedDescription)") }
+                sources = [archive]
+            } else { sources = job.stagedFiles }
+            emit(job, phase: "saving")
+            var lastName = ""
+            for source in sources {
+                let output = try publishFile(source, in: directory)
+                lastName = output.lastPathComponent
+                saved += 1
             }
-            emit(job, phase: "awaiting-save")
-            DispatchQueue.main.async {
-                self.chooseDestination(suggestedName: source.lastPathComponent) { destination in
+            let description = sources.count == 1 ? lastName : "\(saved) photos"
+            finish(job, phase: "completed", message: "Saved: \(description)")
+        } catch {
+            let total = job.format == .zip && job.files.count > 1 ? 1 : job.files.count
+            finish(job, phase: "failed", message: "Save failed (\(saved)/\(total) saved): \(error.localizedDescription)")
+        }
+    }
+
+    // Copy beside the destination, then atomically rename with exclusive creation.
+    // RENAME_EXCL protects both existing files and races with other writers.
+    func publishFile(_ source: URL, in directory: URL) throws -> URL {
+        var template = Array(directory.appendingPathComponent(".GRBrowser-XXXXXX").path.utf8CString)
+        let descriptor = mkstemp(&template)
+        guard descriptor >= 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+        let temporary = URL(fileURLWithPath: String(cString: template))
+        let output = FileHandle(fileDescriptor: descriptor, closeOnDealloc: true)
+        defer { try? output.close(); try? FileManager.default.removeItem(at: temporary) }
+        let input = try FileHandle(forReadingFrom: source)
+        defer { try? input.close() }
+        while let chunk = try input.read(upToCount: 1024 * 1024), !chunk.isEmpty {
+            try output.write(contentsOf: chunk)
+        }
+        try output.close()
+        let ext = source.pathExtension
+        let stem = source.deletingPathExtension().lastPathComponent
+        var suffix = 0
+        while true {
+            let name = suffix == 0 ? source.lastPathComponent
+                : "\(stem) (\(suffix))" + (ext.isEmpty ? "" : ".\(ext)")
+            let destination = directory.appendingPathComponent(name)
+            let result = temporary.path.withCString { from in
+                destination.path.withCString { to in renamex_np(from, to, UInt32(RENAME_EXCL)) }
+            }
+            if result == 0 { return destination }
+            let code = errno
+            guard code == EEXIST else { throw POSIXError(POSIXErrorCode(rawValue: code) ?? .EIO) }
+            suffix += 1
+        }
+    }
+
+    private func resolveDestination(_ job: DownloadOperation) {
+        func begin(_ directory: URL) {
+            self.queue.addOperation {
+                guard self.operation === job else { return }
+                job.destination = directory
+                do {
+                    guard job.files.allSatisfy({ file in
+                        !file.hasPrefix("/") && file.split(separator: "/", omittingEmptySubsequences: false)
+                            .allSatisfy { !$0.isEmpty && $0 != "." && $0 != ".." }
+                    }) else { throw self.failure("Invalid camera file path") }
+                    try FileManager.default.createDirectory(at: job.photosDirectory, withIntermediateDirectories: true)
+                    let configuration = URLSessionConfiguration.ephemeral
+                    configuration.timeoutIntervalForRequest = 30
+                    configuration.timeoutIntervalForResource = 600
+                    self.session = URLSession(configuration: configuration, delegate: self, delegateQueue: self.queue)
+                    self.downloadNext(job)
+                } catch {
+                    self.finish(job, phase: "failed", message: "Download failed: \(error.localizedDescription)")
+                }
+            }
+        }
+        if let directory = preferences.folder(), AppPreferences.usableFolder(directory) {
+            begin(directory)
+        } else {
+            chooseDirectory { directory in
+                guard let directory = directory else {
+                    self.queue.addOperation { self.finish(job, phase: "cancelled", message: "Cancelled") }
+                    return
+                }
+                do { try self.preferences.setFolder(directory); begin(directory) }
+                catch {
                     self.queue.addOperation {
-                        guard self.operation === job else { return }
-                        guard let destination = destination else {
-                            self.finish(job, phase: "cancelled", message: "Cancelled")
-                            return
-                        }
-                        self.emit(job, phase: "saving")
-                        do {
-                            // Map large files when possible; keep disk I/O off the UI thread.
-                            try Data(contentsOf: source, options: .mappedIfSafe).write(to: destination, options: .atomic)
-                            self.finish(job, phase: "completed", message: "Saved: \(destination.lastPathComponent)")
-                        } catch {
-                            self.finish(job, phase: "failed", message: "Save failed: \(error.localizedDescription)")
-                        }
+                        self.finish(job, phase: "failed", message: "Folder unavailable: \(error.localizedDescription)")
                     }
                 }
             }
-        } catch {
-            finish(job, phase: "failed", message: "ZIP failed: \(error.localizedDescription)")
         }
+    }
+
+    func chooseDirectory(completion: @escaping (URL?) -> Void) {
+        pickDownloadFolder(window: webView?.window, initial: preferences.folder(), completion: completion)
     }
 
     // These boundary methods also allow tests to inject save and filesystem failures.
@@ -679,20 +1684,6 @@ class DownloadHandler: NSObject, WKScriptMessageHandler, URLSessionDownloadDeleg
         defer { try? archive.close() }
         guard try archive.read(upToCount: 4) == Data([0x50, 0x4b, 0x03, 0x04]) else {
             throw failure("Invalid photo archive")
-        }
-    }
-
-    func chooseDestination(suggestedName: String, completion: @escaping (URL?) -> Void) {
-        let panel = NSSavePanel()
-        panel.nameFieldStringValue = suggestedName
-        panel.canCreateDirectories = true
-        let respond: (NSApplication.ModalResponse) -> Void = { response in
-            completion(response == .OK ? panel.url : nil)
-        }
-        if let window = webView?.window {
-            panel.beginSheetModal(for: window, completionHandler: respond)
-        } else {
-            panel.begin(completionHandler: respond)
         }
     }
 
@@ -738,18 +1729,206 @@ private func dateStr() -> String {
     return f.string(from: Date())
 }
 
+// MARK: - Settings and connection bridge
+
+final class SettingsPanel: NSPanel {
+    override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        let modifiers = event.modifierFlags.intersection([.command, .option, .control, .shift])
+        if modifiers == .command, event.charactersIgnoringModifiers?.lowercased() == "w", attachedSheet == nil {
+            performClose(nil); return true
+        }
+        return super.performKeyEquivalent(with: event)
+    }
+    override func cancelOperation(_ sender: Any?) {
+        if attachedSheet == nil { performClose(sender) }
+    }
+}
+
+private final class WeakSettingsHandler: NSObject, WKScriptMessageHandler {
+    weak var target: AppController?
+    init(_ target: AppController) { self.target = target }
+    func userContentController(_ controller: WKUserContentController, didReceive message: WKScriptMessage) {
+        target?.userContentController(controller, didReceive: message)
+    }
+}
+
+final class SettingsWindowController: NSWindowController, NSWindowDelegate {
+    let webView: WKWebView
+    init(handler: AppController) {
+        let config = WKWebViewConfiguration()
+        config.userContentController.add(WeakSettingsHandler(handler), name: "app")
+        webView = WKWebView(frame: .zero, configuration: config)
+        let panel = SettingsPanel(contentRect: NSRect(x: 0, y: 0, width: 480, height: 540),
+                                  styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
+        panel.title = "Settings"
+        panel.isReleasedWhenClosed = false
+        panel.hidesOnDeactivate = false
+        panel.minSize = NSSize(width: 400, height: 360)
+        panel.contentView = webView
+        panel.initialFirstResponder = webView
+        super.init(window: panel)
+        panel.delegate = self
+        webView.loadHTMLString(SETTINGS_HTML, baseURL: nil)
+    }
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    func present(relativeTo parent: NSWindow?) {
+        guard let window = window, NSApplication.shared.modalWindow == nil else { return }
+        window.center()
+        if let parent = parent {
+            window.setFrameOrigin(NSPoint(x: parent.frame.midX - window.frame.width / 2,
+                                          y: parent.frame.midY - window.frame.height / 2))
+        }
+        window.makeKeyAndOrderFront(nil)
+        NSApplication.shared.runModal(for: window)
+        window.orderOut(nil)
+        parent?.makeKeyAndOrderFront(nil)
+    }
+    func windowShouldClose(_ sender: NSWindow) -> Bool { sender.attachedSheet == nil }
+    func windowWillClose(_ notification: Notification) {
+        if NSApplication.shared.modalWindow === window { NSApplication.shared.stopModal() }
+    }
+}
+
+final class AppController: NSObject, WKScriptMessageHandler {
+    weak var webView: WKWebView?
+    let preferences: AppPreferences
+    let connection: CameraConnection
+    private let download: DownloadHandler
+    private var choosingFolder = false
+    private var connectionTimer: Timer?
+    private(set) var settingsController: SettingsWindowController?
+    private var settingsScheduled = false
+
+    init(preferences: AppPreferences, download: DownloadHandler, connection: CameraConnection? = nil) {
+        self.preferences = preferences
+        self.download = download
+        self.connection = connection ?? CameraConnection(preferences: preferences)
+        super.init()
+        preferences.onChange = { [weak self] in self?.pushSettings() }
+        self.connection.onChange = { [weak self] in self?.pushSettings() }
+        self.connection.onEvent = { [weak self] in self?.send("_connectionEvent", value: $0) }
+        self.connection.canConnect = { [weak download] in download?.isDownloading == false }
+        download.canStart = { [weak connected = self.connection] in connected?.isConnecting == false }
+        self.connection.passwordPrompt = { [weak self] name, completion in
+            self?.promptPassword(for: name, completion: completion)
+        }
+        let timer = Timer(timeInterval: 2, repeats: true) { [weak self] _ in
+            self?.connection.poll(discover: NSApplication.shared.isActive)
+        }
+        connectionTimer = timer
+        RunLoop.main.add(timer, forMode: .common)
+    }
+    deinit { connectionTimer?.invalidate() }
+    func send(_ function: String, value: [String: Any], to target: WKWebView? = nil) {
+        guard let data = try? JSONSerialization.data(withJSONObject: value),
+              let json = String(data: data, encoding: .utf8) else { return }
+        (target ?? webView)?.evaluateJavaScript("\(function)(\(json))")
+    }
+    func pushSettings() {
+        let value = connection.settingsValue()
+        send("_settingsChanged", value: value)
+        if let settingsWeb = settingsController?.webView { send("_settingsChanged", value: value, to: settingsWeb) }
+    }
+    func showSettings() {
+        guard !settingsScheduled, NSApplication.shared.modalWindow == nil, webView?.window?.attachedSheet == nil else { return }
+        if settingsController == nil { settingsController = SettingsWindowController(handler: self) }
+        settingsScheduled = true
+        // Enter AppKit's modal loop from the run loop, after the WebKit/main-queue callback returns.
+        // This keeps asynchronous preference, network, and download updates running in the modal.
+        RunLoop.main.perform { [weak self] in
+            guard let self = self else { return }
+            self.settingsScheduled = false
+            guard NSApplication.shared.modalWindow == nil, self.webView?.window?.attachedSheet == nil else { return }
+            self.pushSettings()
+            self.connection.refresh()
+            self.settingsController?.present(relativeTo: self.webView?.window)
+            self.webView?.evaluateJavaScript("_settingsClosed()")
+        }
+    }
+    private func showError(_ error: Error) {
+        guard let data = try? JSONSerialization.data(withJSONObject: [error.localizedDescription]),
+              let json = String(data: data, encoding: .utf8) else { return }
+        webView?.evaluateJavaScript("_appError(\(json)[0])")
+        settingsController?.webView.evaluateJavaScript("_appError(\(json)[0])")
+    }
+    func userContentController(_ controller: WKUserContentController, didReceive message: WKScriptMessage) {
+        guard message.frameInfo.isMainFrame, let body = message.body as? [String: Any],
+              let action = body["action"] as? String else { return }
+        switch action {
+        case "ready": pushSettings(); connection.refresh(requestAuthorization: true)
+        case "settingsReady": pushSettings()
+        case "openSettings": showSettings()
+        case "closeSettings": settingsController?.window?.performClose(nil)
+        case "settings": pushSettings(); connection.refresh()
+        case "discover": connection.refresh(requestAuthorization: true)
+        case "format":
+            if let raw = body["value"] as? String, let format = ExportFormat(rawValue: raw) {
+                preferences.setFormat(format)
+            }
+        case "folder":
+            let parent = message.webView?.window ?? webView?.window
+            guard !choosingFolder, parent?.attachedSheet == nil else { return }
+            choosingFolder = true
+            pickDownloadFolder(window: parent, initial: preferences.folder()) { url in
+                self.choosingFolder = false
+                if let url = url {
+                    do { try self.preferences.setFolder(url) } catch { self.showError(error) }
+                }
+                self.pushSettings()
+            }
+        case "forget": if let id = body["id"] as? String { connection.forget(id) }
+        case "connect":
+            if let id = body["id"] as? String {
+                let target = body["target"] as? String ?? ""
+                connection.connect(id: id, target: target.isEmpty ? nil : target)
+            }
+        default: break
+        }
+    }
+    private func promptPassword(for name: String, completion: @escaping ((String, Bool)?) -> Void) {
+        let parent = settingsController?.window?.isVisible == true ? settingsController?.window : webView?.window
+        guard parent?.attachedSheet == nil else { completion(nil); return }
+        let alert = NSAlert()
+        alert.messageText = "Join \(name)"
+        alert.informativeText = "Enter the camera Wi-Fi password. Your Mac will switch to this network."
+        alert.addButton(withTitle: "Join")
+        alert.addButton(withTitle: "Cancel")
+        let view = NSView(frame: NSRect(x: 0, y: 0, width: 300, height: 65))
+        let field = NSSecureTextField(frame: NSRect(x: 0, y: 35, width: 300, height: 24))
+        field.placeholderString = "Wi-Fi password"
+        field.setAccessibilityLabel("Camera Wi-Fi password")
+        let remember = NSButton(checkboxWithTitle: "Remember password in Keychain", target: nil, action: nil)
+        remember.frame = NSRect(x: 0, y: 0, width: 300, height: 24)
+        remember.state = .off
+        view.addSubview(field); view.addSubview(remember)
+        alert.accessoryView = view
+        alert.window.initialFirstResponder = field
+        let respond: (NSApplication.ModalResponse) -> Void = { response in
+            let answer = response == .alertFirstButtonReturn ? (field.stringValue, remember.state == .on) : nil
+            field.stringValue = ""
+            completion(answer)
+        }
+        if let window = parent { alert.beginSheetModal(for: window, completionHandler: respond) }
+        else { respond(alert.runModal()) }
+    }
+}
+
 // MARK: - App Delegate
 
 class AppDelegate: NSObject, NSApplicationDelegate {
     var window: NSWindow!
     var webView: WKWebView!
     let schemeHandler = CameraSchemeHandler()
-    let downloadHandler = DownloadHandler()
+    let preferences = AppPreferences()
+    lazy var downloadHandler = DownloadHandler(preferences: preferences)
+    lazy var controller = AppController(preferences: preferences, download: downloadHandler)
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         let config = WKWebViewConfiguration()
         config.setURLSchemeHandler(schemeHandler, forURLScheme: "gr-cam")
         config.userContentController.add(downloadHandler, name: "download")
+        config.userContentController.add(controller, name: "app")
 
         // Allow mixed content and local resource loading
         config.preferences.setValue(true, forKey: "allowFileAccessFromFileURLs")
@@ -757,6 +1936,18 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         webView = WKWebView(frame: .zero, configuration: config)
         webView.isInspectable = true  // Enable Safari Web Inspector for debugging
         downloadHandler.webView = webView
+        controller.webView = webView
+        let menu = NSMenu()
+        let appItem = NSMenuItem()
+        let appMenu = NSMenu()
+        appItem.submenu = appMenu
+        menu.addItem(appItem)
+        let settingsItem = NSMenuItem(title: "Settings…", action: #selector(showSettings), keyEquivalent: ",")
+        settingsItem.target = self
+        appMenu.addItem(settingsItem)
+        appMenu.addItem(.separator())
+        appMenu.addItem(NSMenuItem(title: "Quit GRBrowser", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
+        NSApplication.shared.mainMenu = menu
 
         // Window
         let screenRect = NSScreen.main?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1200, height: 800)
@@ -780,6 +1971,14 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
         // Load HTML
         webView.loadHTMLString(APP_HTML, baseURL: nil)
+    }
+
+    @objc func showSettings() { controller.showSettings() }
+
+    func applicationDidBecomeActive(_ notification: Notification) {
+        controller.connection.refreshCurrentNetwork()
+        controller.connection.checkConnection()
+        controller.connection.refresh()
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
