@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleExecutable</key>
+    <string>GRBrowser</string>
+    <key>CFBundleIdentifier</key>
+    <string>local.GRBrowser</string>
+    <key>CFBundleName</key>
+    <string>GRBrowser</string>
+    <key>CFBundleDisplayName</key>
+    <string>GR IIIx Browser</string>
+    <key>CFBundleIconFile</key>
+    <string>AppIcon</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleShortVersionString</key>
+    <string>1.0</string>
+    <key>CFBundleVersion</key>
+    <string>1</string>
+    <key>LSMinimumSystemVersion</key>
+    <string>13.3</string>
+    <key>NSHighResolutionCapable</key>
+    <true/>
+    <key>NSLocationUsageDescription</key>
+    <string>Identify nearby camera Wi-Fi networks so you can remember and reconnect to them.</string>
+    <key>NSLocationWhenInUseUsageDescription</key>
+    <string>Identify nearby camera Wi-Fi networks so you can remember and reconnect to them.</string>
+    <key>NSLocalNetworkUsageDescription</key>
+    <string>Connect to your Ricoh camera over Wi-Fi to browse and download photos.</string>
+    <key>NSAppTransportSecurity</key>
+    <dict>
+        <key>NSAllowsArbitraryLoads</key>
+        <true/>
+    </dict>
+</dict>
+</plist>

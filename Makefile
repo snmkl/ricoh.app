@@ -9,6 +9,12 @@ BINARY = $(BUILD_DIR)/$(APP_NAME)
 build:
 	@mkdir -p $(BUILD_DIR)
 	swiftc $(SRC) -o $(BINARY) \
+		-module-cache-path $(BUILD_DIR)/ModuleCache \
+		-target $(shell uname -m)-apple-macosx13.3 \
+		-Xlinker -sectcreate -Xlinker __TEXT -Xlinker __info_plist -Xlinker Info.plist \
+		-framework CoreWLAN \
+		-framework CoreLocation \
+		-framework Security \
 		-framework Cocoa \
 		-framework WebKit \
 		-framework UniformTypeIdentifiers \

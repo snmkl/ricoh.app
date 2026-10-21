@@ -10,16 +10,18 @@ A `WKWebView` renders the UI. A custom URL scheme handler (`gr-cam://`) intercep
 
 ## Requirements
 
-- macOS (Apple Silicon or Intel)
-- Xcode Command Line Tools (`xcode-select --install`)
+- macOS 13.3 or later (Apple Silicon or Intel)
+- Xcode Command Line Tools (`xcode-select --install`) for building
 
 ## Build & Run
 
-```
-make run
+```sh
+./build.sh
+open build/GRBrowser.app
 ```
 
-That's it. Binary lands in `build/GRBrowser`.
+Run `./build.sh install` to build and install in `~/Applications`.
+For development, `make run` still works.
 
 ## Usage
 
@@ -27,6 +29,11 @@ That's it. Binary lands in `build/GRBrowser`.
 2. Connect your Mac to the camera's network (SSID shown on camera screen)
 3. Open the app and hit **CONNECT**
 4. Browse thumbnails, click to preview, select multiple, download as zip
+
+Open **Settings** (⌘,) to choose the download folder and batch format. Downloads
+save directly to that folder. Nearby remembered camera networks appear beside
+**CONNECT**; select one to join its Wi-Fi before connecting to the camera.
+Remove remembered networks with **Forget** in Settings.
 
 ## API Endpoints
 
