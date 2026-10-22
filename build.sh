@@ -38,10 +38,13 @@ trap 'rm -rf "$STAGING_DIR"' EXIT
 STAGED_APP="$STAGING_DIR/$APP_NAME.app"
 mkdir -p "$STAGED_APP/Contents/MacOS" "$STAGED_APP/Contents/Resources"
 
-xcrun swiftc "$ROOT_DIR/GRBrowser.swift" \
+xcrun swiftc "$ROOT_DIR/main.swift" "$ROOT_DIR/GRBrowser.swift" \
+    "$ROOT_DIR/CameraBluetooth.swift" "$ROOT_DIR/CoreBluetoothTransport.swift" "$ROOT_DIR/BluetoothConnection.swift" \
     -o "$STAGED_APP/Contents/MacOS/$APP_NAME" \
     -module-cache-path "$BUILD_DIR/ModuleCache" \
     -target "$(uname -m)-apple-macosx13.3" \
+    -framework SystemConfiguration \
+    -framework CoreBluetooth \
     -framework CoreWLAN \
     -framework CoreLocation \
     -framework Security \

@@ -41,16 +41,16 @@ let APP_HTML: String = ###"""
 
   header {
     border-bottom: 1px solid var(--border);
-    padding: 14px 20px;
-    display: flex; align-items: center; justify-content: space-between;
+    padding: 12px 16px;
+    display: flex; align-items: center; justify-content: space-between; gap: 10px;
     position: sticky; top: 0; background: var(--bg); z-index: 100;
     -webkit-app-region: drag;
   }
-  header button, header input { -webkit-app-region: no-drag; }
+  header button, header input, header select { -webkit-app-region: no-drag; }
 
   .logo {
     font-family: var(--mono); font-weight: 600; font-size: 13px;
-    letter-spacing: 0.06em; display: flex; align-items: center; gap: 10px;
+    letter-spacing: 0.06em; display: flex; align-items: center; gap: 8px; flex-shrink: 0; white-space: nowrap;
   }
   .logo-dot {
     width: 8px; height: 8px; border-radius: 50%;
@@ -58,7 +58,20 @@ let APP_HTML: String = ###"""
   }
   .logo-dot.connected { background: var(--green); }
 
-  .controls { display: flex; gap: 6px; align-items: center; }
+  .controls { display: flex; flex: 1; gap: 6px; align-items: center; justify-content: flex-end; min-width: 0; }
+  header .controls > button { flex-shrink: 0; padding-inline: 8px; }
+  .connection-picker { position: relative; flex: 1 1 260px; min-width: 0; max-width: 320px; }
+  #networkSelect { display: block; width: 100%; max-width: none; min-width: 0;
+    padding: 6px 22px 6px 27px; appearance: none; -webkit-appearance: none; text-overflow: ellipsis; }
+  .connection-picker svg { position: absolute; left: 8px; top: 50%; transform: translateY(-50%);
+    width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 1.8;
+    stroke-linecap: round; stroke-linejoin: round; pointer-events: none; color: var(--green); }
+  .connection-picker::after { content: ''; position: absolute; right: 9px; top: 43%; width: 5px; height: 5px;
+    border-right: 1px solid var(--text-dim); border-bottom: 1px solid var(--text-dim); transform: rotate(45deg); pointer-events: none; }
+  .connection-picker[data-mode="wifi"] .bluetooth-icon,
+  .connection-picker[data-mode="bluetooth"] .wifi-icon { display: none; }
+  #status { overflow-wrap: anywhere; }
+  .status-bar { gap: 8px; flex-wrap: wrap; }
 
   button {
     font-family: var(--mono); font-size: 10px; font-weight: 500;
@@ -188,17 +201,22 @@ let APP_HTML: String = ###"""
 <header>
   <div class="logo"><span class="logo-dot" id="dot"></span> GR IIIx</div>
   <div class="controls">
-    <select id="networkSelect" aria-label="Wi-Fi network" onpointerdown="appMessage('settings')"
-      onchange="this.title=this.selectedOptions[0]?.textContent || ''">
-      <option value="">Current Wi-Fi — checking…</option>
-    </select>
+    <div class="connection-picker" id="connectionPicker" data-mode="wifi">
+      <svg class="bluetooth-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m7 7 10 10-5 5V2l5 5L7 17"/></svg>
+      <svg class="wifi-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M2 8.8a15 15 0 0 1 20 0M5 12a10 10 0 0 1 14 0M8.5 15.5a5 5 0 0 1 7 0"/><circle cx="12" cy="19" r="1"/></svg>
+      <select id="networkSelect" aria-label="Wi-Fi connection target" onpointerdown="appMessage('settings')" onchange="targetChanged()">
+        <option value="">Current Wi-Fi — checking…</option>
+      </select>
+    </div>
+    <button id="findCameras" onclick="appMessage('findBluetooth')" title="Find nearby Bluetooth cameras">Find cameras…</button>
     <button class="primary" id="connBtn" onclick="doConnect()">CONNECT</button>
     <button id="settingsButton" onclick="openSettings()" aria-label="Settings" title="Settings (⌘,)">⚙</button>
   </div>
 </header>
 
 <div class="status-bar">
-  <span id="status">Not connected</span>
+  <span id="status" role="status" aria-live="polite">Not connected</span>
+  <button id="manualWiFi" hidden onclick="useManualWiFi()">Use camera Wi-Fi</button>
   <div style="display:flex;gap:6px;align-items:center">
     <div class="view-toggle">
       <button class="active" onclick="setView('grid',this)">▦</button>
@@ -278,6 +296,26 @@ function openSettings() {
 }
 function _settingsClosed() { settingsFocus?.focus(); }
 function _appError(message) { toast(message); }
+let targetInitialized = false, connectionDraining = false, connectionFinishing = false;
+function updateConnectionMode() {
+  const select = document.getElementById('networkSelect');
+  const bluetooth = select.value.startsWith('bt:');
+  document.getElementById('connectionPicker').dataset.mode = bluetooth ? 'bluetooth' : 'wifi';
+  const mode = bluetooth ? 'Bluetooth' : 'Wi-Fi';
+  select.setAttribute('aria-label', `${mode} connection target`);
+  select.title = `${mode} · ${select.selectedOptions[0]?.textContent || ''}`;
+}
+function targetChanged() {
+  const select = document.getElementById('networkSelect');
+  updateConnectionMode();
+  targetInitialized = true;
+  appMessage('selectTarget', {target:select.value});
+}
+function useManualWiFi() {
+  document.getElementById('networkSelect').value = '';
+  targetChanged();
+  document.getElementById('status').textContent = 'Turn on camera Wi-Fi and join it on your Mac, then press CONNECT.';
+}
 function _settingsChanged(value) {
   appSettings = value;
   const select = document.getElementById('networkSelect');
@@ -285,18 +323,40 @@ function _settingsChanged(value) {
   const known = value.networks.filter(n => value.available.includes(n.id) && n.id !== value.current);
   const currentLabel = value.currentName ? `${value.currentName} (current)` :
     value.wifiConnected === false ? 'No Wi-Fi connection' : 'Current Wi-Fi — name unavailable';
-  const options = [['', currentLabel], ...known.map(n => [n.id, n.name])];
-  const existing = Array.from(select.options, o => [o.value, o.textContent]);
-  if (JSON.stringify(options) !== JSON.stringify(existing)) {
-    select.replaceChildren(...options.map(([id, name]) => new Option(name, id)));
+  const cameras = value.bluetoothCameras || [];
+  const groups = [['Current Wi-Fi', [['', currentLabel]]],
+    ['Bluetooth cameras', cameras.map(c => {
+      const name = c.deviceName || c.name;
+      const duplicate = cameras.some(other => other.id !== c.id && (other.deviceName || other.name) === name);
+      return [c.id, `${name}${duplicate ? ` · ${c.deviceID.slice(-6)}` : ''} · ${c.status}`];
+    })],
+    ['Camera Wi-Fi networks', known.map(n => [n.id, n.name])]];
+  const signature = JSON.stringify(groups);
+  if (select.dataset.signature !== signature) {
+    select.dataset.signature = signature;
+    select.replaceChildren();
+    for (const [label, options] of groups) {
+      if (!options.length) continue;
+      const group = document.createElement('optgroup'); group.label = label;
+      for (const [id, name] of options) group.appendChild(new Option(name, id));
+      select.appendChild(group);
+    }
   }
-  select.value = known.some(n => n.id === previous) ? previous : '';
-  select.title = select.selectedOptions[0]?.textContent || '';
+  const restored = !targetInitialized && value.preferredTarget ? value.preferredTarget : previous;
+  select.value = Array.from(select.options).some(o => o.value === restored) ? restored : '';
+  if (value.preferredTarget) targetInitialized = true;
+  updateConnectionMode();
+  document.getElementById('manualWiFi').hidden = !value.manualRecovery;
+  document.getElementById('findCameras').disabled = !!value.bluetoothControlsDisabled || downloadId !== null;
+  connectionDraining = !!value.connectionDraining;
+  connectionFinishing = !!value.connectionFinishing;
   updateDownloadButtons();
 }
 
 function doConnect() {
-  if (connectionId !== null || downloadId !== null) return;
+  if (downloadId !== null || connectionDraining) return;
+  if (connectionId !== null) { appMessage('cancelConnection'); return; }
+  if (connectedId !== null) { appMessage('disconnect'); return; }
   connectionId = `connect-${Date.now()}-${++downloadSequence}`;
   connectedId = null;
   photos = []; sel.clear(); closeLb(); updSel();
@@ -326,7 +386,9 @@ function _connectionEvent(event) {
   }
   if (connectionId === null || event.id !== connectionId) return;
   document.getElementById('status').textContent = event.warning ? `${event.message} · ${event.warning}` : event.message;
+  if (event.phase === 'draining') { connectionDraining = true; connectionFinishing = !!event.finishing; }
   if (['completed', 'failed', 'cancelled'].includes(event.phase)) {
+    connectionDraining = false; connectionFinishing = false;
     connectionId = null;
     if (event.phase === 'completed') {
       connectedId = event.id;
@@ -414,9 +476,10 @@ function dlSelected() {
 }
 
 function updateDownloadButtons() {
-  document.getElementById('connBtn').disabled = downloadId !== null || connectionId !== null;
-  document.getElementById('connBtn').textContent = connectionId !== null ? 'CONNECTING…' : 'CONNECT';
-  document.getElementById('networkSelect').disabled = downloadId !== null || connectionId !== null;
+  document.getElementById('connBtn').disabled = downloadId !== null || connectionDraining;
+  document.getElementById('connBtn').textContent = connectionDraining ? (connectionFinishing ? 'FINISHING…' : 'CANCELLING…') : connectionId !== null ? 'CANCEL' : connectedId !== null ? 'DISCONNECT' : 'CONNECT';
+  document.getElementById('networkSelect').disabled = downloadId !== null || connectionId !== null || connectedId !== null;
+  document.getElementById('findCameras').disabled = downloadId !== null || connectionId !== null || connectedId !== null;
   document.querySelectorAll('[data-download]').forEach(button => {
     button.disabled = downloadId !== null || connectionId !== null ||
       (button.dataset.download === 'selection' ? sel.size === 0 : !photos[lbIdx]);
@@ -506,6 +569,13 @@ let SETTINGS_HTML: String = ###"""
       <option value="zip">ZIP archive</option><option value="separate">Separate files</option>
     </select>
   </section>
+  <section aria-labelledby="bluetoothTitle">
+    <h2 id="bluetoothTitle">Bluetooth cameras · Experimental</h2>
+    <p><small>Enable Bluetooth on the camera, choose Pairing, and complete the macOS passkey prompt when connecting. Set Action Mode to On anytime to connect while the camera is off.</small></p>
+    <p id="bluetoothNotice" role="status"></p>
+    <button id="findBluetoothButton" onclick="appMessage('findBluetooth')">Enable Bluetooth / Find cameras…</button>
+    <div id="knownBluetooth">No Bluetooth cameras remembered yet.</div>
+  </section>
   <section aria-labelledby="networksTitle">
     <h2 id="networksTitle">Known camera networks</h2>
     <div id="knownNetworks">No camera networks remembered yet.</div>
@@ -519,6 +589,24 @@ let SETTINGS_HTML: String = ###"""
 function appMessage(action, value = {}) { window.webkit.messageHandlers.app.postMessage({action, ...value}); }
 function _appError(message) { document.getElementById('settingsError').textContent = message; }
 function _settingsChanged(value) {
+  document.getElementById('bluetoothNotice').textContent = value.bluetoothState || 'Bluetooth access is requested only when you choose Find cameras.';
+  document.getElementById('findBluetoothButton').disabled = !!value.bluetoothControlsDisabled;
+  const bluetoothList = document.getElementById('knownBluetooth');
+  bluetoothList.replaceChildren();
+  for (const camera of value.bluetoothCameras || []) {
+    const row = document.createElement('div'); row.className = 'known-network';
+    const label = document.createElement('div'); label.className = 'network-description';
+    label.textContent = `${camera.name} (${camera.deviceName}) · ${camera.status}`;
+    row.appendChild(label);
+    if (camera.remembered) {
+      const button = document.createElement('button'); button.textContent = 'Forget camera';
+      button.disabled = camera.active; button.title = camera.active ? 'Disconnect and finish active operations before forgetting this camera.' : '';
+      button.setAttribute('aria-label', `Forget camera ${camera.name}`);
+      button.onclick = () => appMessage('forgetBluetooth', {id:camera.deviceID}); row.appendChild(button);
+    }
+    bluetoothList.appendChild(row);
+  }
+  if (!bluetoothList.children.length) bluetoothList.textContent = 'No Bluetooth cameras remembered yet.';
   document.getElementById('folderPath').textContent = value.folder || 'Choose a download folder';
   document.getElementById('exportFormat').value = value.format;
   document.getElementById('networkNotice').textContent = value.notice || 'Remembered after a successful camera connection.';
@@ -637,7 +725,7 @@ enum ExportFormat: String { case zip, separate }
 
 // Read and changed on the main thread; download operations receive immutable snapshots.
 final class AppPreferences {
-    private let defaults: UserDefaults
+    let defaults: UserDefaults
     private let key = "settings.v1"
     private(set) var format: ExportFormat = .zip
     private(set) var networks: [KnownCameraNetwork] = []
@@ -723,13 +811,17 @@ func pickDownloadFolder(window: NSWindow?, initial: URL?, completion: @escaping 
 }
 
 protocol WiFiAccess {
+    func enabled() -> Bool
     func current() -> CameraNetwork?
     func scan() throws -> [CameraNetwork]
     func join(_ network: CameraNetwork, password: String?) throws
     func ready(on network: CameraNetwork?) -> Bool
 }
 
+extension WiFiAccess { func enabled() -> Bool { true } }
+
 final class MacWiFi: WiFiAccess {
+    func enabled() -> Bool { interface()?.powerOn() == true }
     private var scanned: [String: CWNetwork] = [:]
     private func interface() -> CWInterface? { CWWiFiClient.shared().interface() }
     func current() -> CameraNetwork? {
@@ -891,12 +983,16 @@ final class KeychainCameraCredentials: CameraCredentials {
 
 struct CameraPhoto { let dir: String; let file: String }
 protocol CameraVerification {
+    func identify(_ identity: BluetoothIdentity, completion: @escaping (Result<Void, Error>) -> Void)
     func verify(_ completion: @escaping (Result<[CameraPhoto], Error>) -> Void)
     func ping(_ completion: @escaping (Result<Void, Error>) -> Void)
     func cancel()
 }
 
 extension CameraVerification {
+    func identify(_ identity: BluetoothIdentity, completion: @escaping (Result<Void, Error>) -> Void) {
+        completion(.failure(appError("Camera identity verification is unavailable.")))
+    }
     func ping(_ completion: @escaping (Result<Void, Error>) -> Void) {
         verify { completion($0.map { _ in () }) }
     }
@@ -953,6 +1049,20 @@ final class HTTPCameraVerification: CameraVerification {
         }
         task?.resume()
     }
+    func identify(_ identity: BluetoothIdentity, completion: @escaping (Result<Void, Error>) -> Void) {
+        let token = generation
+        request("v1/props", token: token) { result in
+            completion(result.flatMap { data in Result {
+                guard let props = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+                      props["model"] as? String == identity.model else {
+                    throw appError("Wi-Fi camera identity does not match the selected Bluetooth camera.")
+                }
+                if let serial = identity.serial, let other = (props["serialNo"] ?? props["serialNumber"] ?? props["serial"]) as? String, serial != other {
+                    throw appError("Wi-Fi camera serial does not match the selected Bluetooth camera.")
+                }
+            } })
+        }
+    }
     static func photos(from data: Data) throws -> [CameraPhoto] {
         let json = try JSONSerialization.jsonObject(with: data)
         var photos: [CameraPhoto] = []
@@ -982,28 +1092,36 @@ final class HTTPCameraVerification: CameraVerification {
 
 // Main-thread lifecycle; blocking Wi-Fi and Keychain calls run on the serial worker.
 final class CameraConnection {
+    let bluetooth: CameraBluetoothAccess
+    let devices: BluetoothDeviceStore
+    var selectedBluetooth: UUID?
+    var nextBluetoothDiscovery = Date.distantPast
+    var bluetoothLabel = ""
+    var releasedBluetooth: UUID?
+    var manualRecovery = false
+    var selectionRevision = 0
     let preferences: AppPreferences
-    private let wifi: WiFiAccess
-    private let authorization: WiFiAuthorization
-    private let credentials: CameraCredentials
-    private let savedCredentials: SavedWiFiCredentials
-    private let camera: CameraVerification
-    private let health: CameraVerification
-    private let worker = DispatchQueue(label: "GRBrowser.wifi", qos: .userInitiated)
-    private let now: () -> Date
-    private let later: (TimeInterval, @escaping () -> Void) -> Void
-    private let timeout: TimeInterval
-    private var attempt: Attempt?
-    private var session: Session?
-    private var healthCheck: UUID?
-    private var scanGeneration = 0
-    private var scanning = false
-    private var checkingCurrent = false
-    private var nextDiscovery = Date.distantPast
-    private var forgetting = Set<String>()
+    let wifi: WiFiAccess
+    let authorization: WiFiAuthorization
+    let credentials: CameraCredentials
+    let savedCredentials: SavedWiFiCredentials
+    let camera: CameraVerification
+    let health: CameraVerification
+    let worker = DispatchQueue(label: "GRBrowser.wifi", qos: .userInitiated)
+    let now: () -> Date
+    let later: (TimeInterval, @escaping () -> Void) -> Void
+    let timeout: TimeInterval
+    var attempt: Attempt?
+    var session: Session?
+    var healthCheck: UUID?
+    var scanGeneration = 0
+    var scanning = false
+    var checkingCurrent = false
+    var nextDiscovery = Date.distantPast
+    var forgetting = Set<String>()
     private(set) var nearby: [CameraNetwork] = []
     private(set) var currentNetwork: CameraNetwork?
-    private var wifiReady: Bool?
+    var wifiReady: Bool?
     var currentID: String? { currentNetwork?.id }
     private(set) var notice = "Enable Wi-Fi discovery to remember and reconnect to camera networks."
     var onChange: (() -> Void)?
@@ -1017,6 +1135,7 @@ final class CameraConnection {
     // Permission requests remain explicit; polling never prompts or switches Wi-Fi.
     func poll(discover: Bool = true) {
         checkConnection()
+        pollBluetooth(discover: discover)
         if discover { refreshCurrentNetwork() }
         if discover, !preferences.networks.isEmpty, authorization.allowed, now() >= nextDiscovery { refresh() }
     }
@@ -1040,25 +1159,36 @@ final class CameraConnection {
         }
     }
 
-    @discardableResult private func setCurrent(_ network: CameraNetwork?, ready: Bool) -> Bool {
+    @discardableResult func setCurrent(_ network: CameraNetwork?, ready: Bool) -> Bool {
         let changed = currentNetwork != network || wifiReady != ready
         currentNetwork = network; wifiReady = ready
         return changed
     }
 
-    private final class Session {
+    final class Session {
         let id: String
         let revisions: [String: Int]
         let photoCount: Int
+        let bluetoothID: UUID?
         var network: CameraNetwork?
         init(job: Attempt, photoCount: Int) {
-            id = job.id; revisions = job.revisions; network = job.initial; self.photoCount = photoCount
+            id = job.id; revisions = job.revisions; network = job.initial; self.photoCount = photoCount; bluetoothID = job.bluetoothID
         }
     }
 
-    private final class Attempt {
+    final class Attempt {
         let id: String
-        let target: String?
+        let cancellation = ConnectionCancellation()
+        var target: String?
+        var bluetoothID: UUID?
+        var bluetoothRevision = 0
+        var bluetoothIdentity: BluetoothIdentity?
+        var bluetoothCredentials: BluetoothWiFiCredentials?
+        var credentialRefreshed = false
+        var deadline: Date?
+        var terminal: String?
+        var selectionRevision = 0
+        var propsVerified = false
         let revisions: [String: Int]
         var initial: CameraNetwork?
         var pendingPassword: String?
@@ -1071,7 +1201,8 @@ final class CameraConnection {
         }
     }
 
-    init(preferences: AppPreferences, wifi: WiFiAccess = MacWiFi(),
+    init(bluetooth: CameraBluetoothAccess = BluetoothCamera(), devices: BluetoothDeviceStore? = nil,
+         preferences: AppPreferences, wifi: WiFiAccess = MacWiFi(),
          authorization: WiFiAuthorization = MacWiFiAuthorization(),
          credentials: CameraCredentials = KeychainCameraCredentials(),
          savedCredentials: SavedWiFiCredentials = MacWiFiCredentials(),
@@ -1081,10 +1212,13 @@ final class CameraConnection {
          later: @escaping (TimeInterval, @escaping () -> Void) -> Void = { delay, work in
              DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
          }) {
+        self.bluetooth = bluetooth; self.devices = devices ?? BluetoothDeviceStore(defaults: preferences.defaults)
+        self.selectedBluetooth = self.devices.preferred
         self.preferences = preferences; self.wifi = wifi; self.authorization = authorization
         self.credentials = credentials; self.savedCredentials = savedCredentials
         self.camera = camera; self.health = health; self.timeout = timeout
         self.now = now; self.later = later
+        bluetooth.onChange = { [weak self] in self?.onChange?() }
     }
 
     // Poll local Wi-Fi and the camera, including when SSID access is denied. No internet is required.
@@ -1133,7 +1267,7 @@ final class CameraConnection {
         }
     }
 
-    private func disconnected(_ connected: Session) {
+    func disconnected(_ connected: Session) {
         guard session === connected else { return }
         session = nil; healthCheck = nil; health.cancel()
         scanGeneration += 1
@@ -1142,7 +1276,7 @@ final class CameraConnection {
         onEvent?(["id": connected.id, "phase": "disconnected", "message": "Camera disconnected. Check Wi-Fi and connect again."])
     }
 
-    private func remember(_ network: CameraNetwork) {
+    func remember(_ network: CameraNetwork) {
         setCurrent(network, ready: true)
         if !nearby.contains(where: { $0.id == network.id }) { nearby.append(network) }
         preferences.remember(network, at: now())
@@ -1184,19 +1318,25 @@ final class CameraConnection {
         guard !isConnecting, canConnect(), !id.isEmpty else { return }
         session = nil; healthCheck = nil; health.cancel()
         scanGeneration += 1
-        let job = Attempt(id: id, target: target, revisions: preferences.revisions)
-        attempt = job
+        let bluetoothID = target.flatMap { $0.hasPrefix("bt:") ? UUID(uuidString: String($0.dropFirst(3))) : nil }
+        let job = Attempt(id: id, target: bluetoothID == nil ? target : nil, revisions: preferences.revisions)
+        job.bluetoothID = bluetoothID; job.selectionRevision = selectionRevision
+        job.bluetoothRevision = bluetoothID.map { devices.revisions[$0, default: 0] } ?? 0
+        attempt = job; manualRecovery = false
+        if let bluetoothID = bluetoothID {
+            beginBluetooth(job, id: bluetoothID); return
+        }
         if let target = target, !preferences.networks.contains(where: { $0.network.id == target }) {
             finish(job, error: appError("That camera network was forgotten.")); return
         }
         event(job, phase: "preparing", message: "Preparing connection…")
         authorization.request { allowed in
-            guard self.attempt === job else { return }
+            guard self.isLive(job) else { return }
             self.begin(job, allowed: allowed)
         }
     }
 
-    private func begin(_ job: Attempt, allowed: Bool) {
+    func begin(_ job: Attempt, allowed: Bool) {
         notice = allowed ? "" : "Wi-Fi names need Location Services access. Current Wi-Fi connection still works."
         if !allowed { nearby = []; currentNetwork = nil }
         onChange?()
@@ -1211,7 +1351,7 @@ final class CameraConnection {
                 return network
             }
             DispatchQueue.main.async {
-                guard self.attempt === job else { return }
+                guard self.isLive(job) else { return }
                 job.initial = initial
                 if let initial = initial { self.setCurrent(initial, ready: true); self.onChange?() }
                 switch result {
@@ -1224,15 +1364,15 @@ final class CameraConnection {
         }
     }
 
-    private enum CredentialSource { case macOS, app, manual }
+    enum CredentialSource { case macOS, app, manual }
 
-    private func obtainPassword(_ job: Attempt, network: CameraNetwork, source: CredentialSource = .macOS) {
+    func obtainPassword(_ job: Attempt, network: CameraNetwork, source: CredentialSource = .macOS) {
         guard network.secured else { join(job, network: network, password: nil); return }
         guard source != .manual else {
             event(job, phase: "credentials", message: job.lastFailure == nil ? "Waiting for Wi-Fi password…"
                 : "Saved password could not connect. Enter the camera Wi-Fi password…")
             passwordPrompt(network.name) { answer in
-                guard self.attempt === job else { return }
+                guard self.isLive(job) else { return }
                 guard let (password, remember) = answer else {
                     self.finish(job, phase: "cancelled", message: "Connection cancelled"); return
                 }
@@ -1249,7 +1389,7 @@ final class CameraConnection {
             let result = Result { try source == .macOS ? self.savedCredentials.password(for: network.id)
                                                      : self.credentials.password(for: network.id) }
             DispatchQueue.main.async {
-                guard self.attempt === job else { return }
+                guard self.isLive(job) else { return }
                 switch result {
                 case .failure(SavedWiFiCredentialError.cancelled):
                     self.finish(job, phase: "cancelled", message: "Keychain access cancelled")
@@ -1264,12 +1404,13 @@ final class CameraConnection {
         }
     }
 
-    private func join(_ job: Attempt, network: CameraNetwork, password: String?, fallback: (() -> Void)? = nil) {
+    func join(_ job: Attempt, network: CameraNetwork, password: String?, fallback: (() -> Void)? = nil) {
         event(job, phase: "joining", message: "Joining \(network.name)…")
         worker.async {
+            guard !job.cancellation.isCancelled else { return }
             let result = Result { try self.wifi.join(network, password: password) }
             DispatchQueue.main.async {
-                guard self.attempt === job else { return }
+                guard self.isLive(job) else { return }
                 switch result {
                 case .failure(let error):
                     if let fallback = fallback { job.lastFailure = error; fallback() }
@@ -1283,11 +1424,11 @@ final class CameraConnection {
         }
     }
 
-    private func startVerification(_ job: Attempt, network: CameraNetwork?, waitForNetwork: Bool) {
+    func startVerification(_ job: Attempt, network: CameraNetwork?, waitForNetwork: Bool) {
         // User prompts are outside this bounded network/camera readiness interval.
-        let deadline = now().addingTimeInterval(timeout)
+        let deadline = job.deadline ?? now().addingTimeInterval(timeout)
         later(timeout) {
-            if self.attempt === job && !job.verified {
+            if self.isLive(job) && !job.verified {
                 let fallback = job.waitingForNetwork ? "Wi-Fi joined but its local network did not become ready."
                     : "Camera connection timed out. Check camera Wi-Fi and try again."
                 self.finish(job, error: job.lastFailure ?? appError(fallback))
@@ -1295,13 +1436,13 @@ final class CameraConnection {
         }
         job.waitingForNetwork = waitForNetwork
         func checkReadiness() {
-            guard self.attempt === job else { return }
+            guard self.isLive(job) else { return }
             if !waitForNetwork { self.verify(job, deadline: deadline); return }
             self.event(job, phase: "waiting", message: "Waiting for camera Wi-Fi…")
             self.worker.async {
                 let ready = self.wifi.ready(on: network)
                 DispatchQueue.main.async {
-                    guard self.attempt === job else { return }
+                    guard self.isLive(job) else { return }
                     if ready { self.verify(job, deadline: deadline) }
                     else if self.now() < deadline { self.later(0.25, checkReadiness) }
                     else { self.finish(job, error: appError("Wi-Fi did not become ready.")) }
@@ -1311,22 +1452,22 @@ final class CameraConnection {
         checkReadiness()
     }
 
-    private func verify(_ job: Attempt, deadline: Date) {
+    func verify(_ job: Attempt, deadline: Date) {
         job.waitingForNetwork = false
         event(job, phase: "camera", message: "Connecting to camera…")
         camera.verify { result in
-            guard self.attempt === job else { return }
+            guard self.isLive(job) else { return }
             switch result {
             case .failure(let error):
                 job.lastFailure = error
-                if self.now() < deadline { self.later(0.75) { if self.attempt === job { self.verify(job, deadline: deadline) } } }
+                if self.now() < deadline { self.later(0.75) { if self.isLive(job) { self.verify(job, deadline: deadline) } } }
                 else { self.finish(job, error: error) }
             case .success(let photos):
                 let allowed = self.authorization.allowed
                 self.worker.async {
                     let final = allowed ? self.wifi.current() : nil
                     DispatchQueue.main.async {
-                        guard self.attempt === job else { return }
+                        guard self.isLive(job) else { return }
                         guard job.target == nil || final?.id == job.target else {
                             self.finish(job, error: appError("Wi-Fi changed before camera verification finished.")); return
                         }
@@ -1338,6 +1479,16 @@ final class CameraConnection {
                         if let initial = job.initial, let final = final, initial.id != final.id {
                             self.finish(job, error: appError("Wi-Fi changed before camera verification finished.")); return
                         }
+                        if let identity = job.bluetoothIdentity, !job.propsVerified {
+                            self.camera.identify(identity) { result in
+                                guard self.isLive(job) else { return }
+                                switch result {
+                                case .failure(let error): self.finish(job, error: error)
+                                case .success: job.propsVerified = true; self.verify(job, deadline: deadline)
+                                }
+                            }
+                            return
+                        }
                         job.verified = true
                         let stable = final != nil && final?.id == job.initial?.id
                         let forgotten = final.map { self.preferences.revisions[$0.id, default: 0] != job.revisions[$0.id, default: 0] } ?? false
@@ -1347,9 +1498,10 @@ final class CameraConnection {
                         if !stable { job.initial = nil }
                         if stable, !forgotten, let password = job.pendingPassword, let final = final {
                             self.worker.async {
+                                guard !job.cancellation.isCancelled else { return }
                                 let result = Result { try self.credentials.save(password, for: final.id) }
                                 DispatchQueue.main.async {
-                                    guard self.attempt === job else { return }
+                                    guard self.isLive(job) else { return }
                                     // Forget can run while a credential write is queued; serialize deletion after it.
                                     if case .failure(let error) = result { self.complete(job, photos: photos, warning: error.localizedDescription) }
                                     else { self.complete(job, photos: photos) }
@@ -1362,8 +1514,7 @@ final class CameraConnection {
         }
     }
 
-    private func complete(_ job: Attempt, photos: [CameraPhoto], warning: String? = nil) {
-        session = Session(job: job, photoCount: photos.count)
+    func complete(_ job: Attempt, photos: [CameraPhoto], warning: String? = nil) {
         var value: [String: Any] = ["photos": photos.map { ["dir": $0.dir, "file": $0.file] }]
         let identityWarning = job.initial == nil ? (authorization.allowed
             ? "Wi-Fi name unavailable; network not remembered yet."
@@ -1383,7 +1534,7 @@ final class CameraConnection {
             DispatchQueue.main.async {
                 self.forgetting.remove(id)
                 switch result {
-                case .success: self.preferences.forget(id)
+                case .success: self.preferences.forget(id); self.devices.unlink(id)
                 case .failure(let error): self.notice = error.localizedDescription
                 }
                 self.onChange?()
@@ -1392,28 +1543,51 @@ final class CameraConnection {
     }
 
     func settingsValue() -> [String: Any] {
-        ["folder": preferences.folder()?.path ?? "", "format": preferences.format.rawValue,
+        var value: [String: Any] = ["folder": preferences.folder()?.path ?? "", "format": preferences.format.rawValue,
          "networks": preferences.networks.map { ["id": $0.network.id, "name": $0.network.name,
              "lastConnected": $0.lastConnected.timeIntervalSince1970, "forgetting": forgetting.contains($0.network.id)] },
          "available": nearby.map { $0.id }, "current": currentID ?? "", "notice": notice,
          "currentName": currentNetwork?.name ?? "", "wifiConnected": wifiReady.map { $0 as Any } ?? NSNull(),
          "discoveryAllowed": authorization.allowed]
+        value.merge(bluetoothSettings()) { _, new in new }
+        return value
     }
 
-    private func event(_ job: Attempt, phase: String, message: String) {
-        guard attempt === job else { return }
+    func event(_ job: Attempt, phase: String, message: String) {
+        guard isLive(job) else { return }
         onEvent?(["id": job.id, "phase": phase, "message": message])
     }
-    private func finish(_ job: Attempt, error: Error) { finish(job, phase: "failed", message: error.localizedDescription) }
-    private func finish(_ job: Attempt, phase: String, message: String, extra: [String: Any] = [:]) {
-        guard attempt === job else { return }
-        camera.cancel()
-        job.pendingPassword = nil
-        job.triedPasswords.removeAll()
-        attempt = nil
-        var value = extra
-        value.merge(["id": job.id, "phase": phase, "message": message]) { _, new in new }
-        onEvent?(value)
+    func finish(_ job: Attempt, error: Error) { finish(job, phase: "failed", message: error.localizedDescription) }
+    func finish(_ job: Attempt, phase: String, message: String, extra: [String: Any] = [:]) {
+        guard isLive(job) else { return }
+        job.terminal = phase; camera.cancel()
+        if phase != "completed" { job.cancellation.cancel() }
+        job.pendingPassword = nil; job.triedPasswords.removeAll(); job.bluetoothCredentials = nil
+        if phase != "completed", job.bluetoothID != nil { manualRecovery = true }
+        onEvent?(["id": job.id, "phase": "draining", "finishing": phase == "completed", "message": phase == "completed" ? "Finishing connection…" : "Cancelling… Waiting for pending network operations."])
+        onChange?()
+        let drained = DispatchGroup()
+        drained.enter(); worker.async { drained.leave() }
+        if job.bluetoothID != nil {
+            drained.enter()
+            bluetooth.release { drained.leave() }
+        }
+        drained.notify(queue: .main) {
+            guard self.attempt === job else { return }
+            if let id = job.bluetoothID { self.releasedBluetooth = id }
+            self.attempt = nil
+            if phase == "completed" {
+                let count = (extra["photos"] as? [[String: String]])?.count ?? 0
+                self.session = Session(job: job, photoCount: count)
+                if let id = job.bluetoothID, self.devices.revisions[id, default: 0] == job.bluetoothRevision {
+                    let linked = job.initial.flatMap { self.preferences.revisions[$0.id, default: 0] == job.revisions[$0.id, default: 0] ? $0.id : nil }
+                    self.devices.succeeded(id, network: linked, at: self.now())
+                }
+            }
+            var value = extra
+            value.merge(["id": job.id, "phase": phase, "message": message]) { _, new in new }
+            self.onEvent?(value); self.onChange?(); self.refreshCurrentNetwork()
+        }
     }
 }
 
@@ -1797,6 +1971,7 @@ final class AppController: NSObject, WKScriptMessageHandler {
     private let download: DownloadHandler
     private var choosingFolder = false
     private var connectionTimer: Timer?
+    private var sleepObserver: NSObjectProtocol?
     private(set) var settingsController: SettingsWindowController?
     private var settingsScheduled = false
 
@@ -1818,8 +1993,13 @@ final class AppController: NSObject, WKScriptMessageHandler {
         }
         connectionTimer = timer
         RunLoop.main.add(timer, forMode: .common)
+        sleepObserver = NSWorkspace.shared.notificationCenter.addObserver(forName: NSWorkspace.willSleepNotification,
+            object: nil, queue: .main) { [weak self] _ in self?.connection.computerWillSleep() }
     }
-    deinit { connectionTimer?.invalidate() }
+    deinit {
+        connectionTimer?.invalidate()
+        if let observer = sleepObserver { NSWorkspace.shared.notificationCenter.removeObserver(observer) }
+    }
     func send(_ function: String, value: [String: Any], to target: WKWebView? = nil) {
         guard let data = try? JSONSerialization.data(withJSONObject: value),
               let json = String(data: data, encoding: .utf8) else { return }
@@ -1878,6 +2058,11 @@ final class AppController: NSObject, WKScriptMessageHandler {
                 self.pushSettings()
             }
         case "forget": if let id = body["id"] as? String { connection.forget(id) }
+        case "findBluetooth": connection.findBluetooth()
+        case "selectTarget": if let target = body["target"] as? String { connection.selectTarget(target) }
+        case "forgetBluetooth": if let id = body["id"] as? String { connection.forgetBluetooth(id) }
+        case "cancelConnection": connection.cancelConnection()
+        case "disconnect": connection.disconnectSession()
         case "connect":
             if let id = body["id"] as? String {
                 let target = body["target"] as? String ?? ""
@@ -1985,12 +2170,3 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         return true
     }
 }
-
-// MARK: - Main
-
-let app = NSApplication.shared
-let delegate = AppDelegate()
-app.delegate = delegate
-app.setActivationPolicy(.regular)
-app.activate(ignoringOtherApps: true)
-app.run()

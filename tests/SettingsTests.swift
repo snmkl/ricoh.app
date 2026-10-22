@@ -119,6 +119,9 @@ final class FakeWiFi: WiFiAccess {
     var scans = 0
     var readinessChecks = 0
     var onCurrent: (() -> CameraNetwork?)?
+    var onJoin: (() -> Void)?
+    var enabledValue = true
+    func enabled() -> Bool { enabledValue }
     func current() -> CameraNetwork? {
         if let onCurrent = onCurrent { return onCurrent() }
         return joined
@@ -129,6 +132,7 @@ final class FakeWiFi: WiFiAccess {
         return networks
     }
     func join(_ network: CameraNetwork, password: String?) throws {
+        onJoin?()
         joins.append(network.id)
         joinPasswords.append(password)
         if joinError || password.map({ rejectedPasswords.contains($0) }) == true { throw appError("Could not join Wi-Fi") }
@@ -158,6 +162,10 @@ final class FakeCredentials: CameraCredentials, SavedWiFiCredentials {
     }
 }
 final class FakeCamera: CameraVerification {
+    var identityMatches = true
+    func identify(_ identity: BluetoothIdentity, completion: @escaping (Result<Void, Error>) -> Void) {
+        completion(identityMatches ? .success(()) : .failure(appError("Camera identity mismatch")))
+    }
     var result: Result<[CameraPhoto], Error> = .success([])
     var pending: [(Result<[CameraPhoto], Error>) -> Void] = []
     var hold = false
@@ -190,7 +198,7 @@ final class ConnectionRig {
     let camera = FakeCamera()
     let health = FakeCamera()
     let clock = TestClock()
-    lazy var connection = CameraConnection(preferences: prefs, wifi: wifi, authorization: auth, credentials: credentials,
+    lazy var connection = CameraConnection(bluetooth: FakeBluetoothAccess(), preferences: prefs, wifi: wifi, authorization: auth, credentials: credentials,
                                            savedCredentials: savedCredentials, camera: camera, health: health,
                                            now: { self.clock.time }, later: clock.schedule)
     var events: [[String: Any]] = []
@@ -553,12 +561,12 @@ jsCheck("!document.getElementById('networkSelect').hidden && document.getElement
 _ = js("document.dispatchEvent(new KeyboardEvent('keydown',{key:',',metaKey:true,bubbles:true}));")
 waitFor("Command-comma requests native Settings") { appBridge.requests.filter { $0["action"] as? String == "openSettings" }.count == 2 }
 _ = js("_settingsClosed(); doConnect();")
-jsCheck("connectionId !== null && document.getElementById('connBtn').disabled && Array.from(document.querySelectorAll('[data-download]')).every(b=>b.disabled)", "Connecting locks conflicting actions")
+jsCheck("connectionId !== null && !document.getElementById('connBtn').disabled && document.getElementById('connBtn').textContent === 'CANCEL' && Array.from(document.querySelectorAll('[data-download]')).every(b=>b.disabled)", "Connecting locks conflicting actions")
 _ = js("_connectionEvent({id:'stale',phase:'completed',message:'wrong',photos:[]});")
 jsCheck("connectionId !== null", "Stale connection UI event ignored")
 _ = js("_connectionEvent({id:connectionId,phase:'completed',message:'0 photos',photos:[]});")
 jsCheck("connectionId === null && !document.getElementById('connBtn').disabled", "Connection result unlocks controls")
-_ = js("doConnect(); _connectionEvent({id:connectionId,phase:'completed',message:'1 photo',photos:[{dir:'DCIM',file:'one.JPG'}]}); selAll(); openLb(0);")
+_ = js("_connectionEvent({id:connectedId,phase:'disconnected',message:'Reset'}); doConnect(); _connectionEvent({id:connectionId,phase:'completed',message:'1 photo',photos:[{dir:'DCIM',file:'one.JPG'}]}); selAll(); openLb(0);")
 jsCheck("photos.length === 1 && document.getElementById('dot').classList.contains('connected')", "Verified connection displays its photos")
 _ = js("_connectionEvent({id:connectedId,phase:'disconnected',message:'Camera disconnected.'});")
 jsCheck("connectedId === null && photos.length === 0 && sel.size === 0 && !document.getElementById('dot').classList.contains('connected') && document.getElementById('grid').children.length === 0 && !document.getElementById('lb').classList.contains('open') && document.getElementById('selAllBtn').disabled && document.getElementById('dlBtn').disabled && document.getElementById('status').textContent === 'Camera disconnected.'", "Disconnect clears photos, selection, preview, status, and download controls")
@@ -566,7 +574,7 @@ _ = js("doConnect(); _connectionEvent({id:connectionId,phase:'completed',message
 jsCheck("document.getElementById('status').textContent.includes('Allow Location Services')", "Missing Wi-Fi identity is explained beside connection status")
 _ = js("_connectionEvent({id:connectedId,phase:'remembered',message:'0 photos'});")
 jsCheck("document.getElementById('status').textContent === '0 photos'", "Late network learning clears the missing-identity warning")
-_ = js("const previousSession = connectedId; doConnect(); _connectionEvent({id:previousSession,phase:'disconnected',message:'Stale loss'});")
+_ = js("const previousSession = connectedId; _connectionEvent({id:connectedId,phase:'disconnected',message:'Reset'}); doConnect(); _connectionEvent({id:previousSession,phase:'disconnected',message:'Stale loss'});")
 jsCheck("connectionId !== null && document.getElementById('status').textContent !== 'Stale loss'", "Old disconnect events cannot replace a new connection")
 _ = js("_connectionEvent({id:connectionId,phase:'completed',message:'0 photos',photos:[]});")
 uiValue("_settingsChanged", ["folder": "", "format": "zip", "networks": [
@@ -580,7 +588,7 @@ uiValue("_settingsChanged", ["folder": "", "format": "zip", "networks": [
     "available": [cameraA.id, cameraB.id], "current": cameraA.id, "currentName": cameraA.name, "wifiConnected": true, "notice": ""])
 jsCheck("document.getElementById('networkSelect').value === '' && document.getElementById('networkSelect').options.length === 2 && document.getElementById('networkSelect').selectedOptions[0].textContent === 'GR_A (current)'", "Selector defaults to the current network rather than silently targeting another camera")
 _ = js("document.getElementById('networkSelect').value='\(cameraB.id)'; document.getElementById('networkSelect').dispatchEvent(new Event('change'));")
-jsCheck("document.getElementById('networkSelect').title === 'GR_B'", "Selector tooltip follows an explicitly selected target immediately")
+jsCheck("document.getElementById('networkSelect').title === 'Wi-Fi · GR_B'", "Selector tooltip follows an explicitly selected target immediately")
 uiValue("_settingsChanged", ["folder": "", "format": "zip", "networks": [
     ["id": cameraB.id, "name": cameraB.name, "lastConnected": 200, "forgetting": false]],
     "available": [cameraB.id], "current": cameraA.id, "currentName": cameraA.name, "wifiConnected": true, "notice": ""])
@@ -608,7 +616,7 @@ liveAuthorization.allowed = false; liveAuthorization.hold = true
 let liveWiFi = FakeWiFi()
 liveWiFi.networks = []; liveWiFi.joined = homeNetwork
 let liveClock = TestClock()
-let liveConnection = CameraConnection(preferences: livePrefs, wifi: liveWiFi, authorization: liveAuthorization,
+let liveConnection = CameraConnection(bluetooth: FakeBluetoothAccess(), preferences: livePrefs, wifi: liveWiFi, authorization: liveAuthorization,
                                       credentials: FakeCredentials(), savedCredentials: FakeCredentials(),
                                       camera: FakeCamera(), health: FakeCamera(),
                                       now: { liveClock.time }, later: liveClock.schedule)

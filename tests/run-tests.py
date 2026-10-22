@@ -19,6 +19,13 @@ PAYLOAD = bytes(range(256)) * 8192
 class CameraFixture(BaseHTTPRequestHandler):
     def do_GET(self):
         path = unquote(self.path)
+        if path == '/v1/props':
+            data = json.dumps({'model': 'RICOH GR IIIx', 'serialNo': 'fixture-serial'}).encode()
+            self.send_response(200)
+            self.send_header('Content-Length', str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+            return
         if path in ['/v1/ping', '/v1/photos']:
             data = b'{}' if path.endswith('/ping') else json.dumps({'dirs': []}).encode()
             self.send_response(200)
@@ -54,17 +61,18 @@ with tempfile.TemporaryDirectory(prefix='download-tests-', dir=ROOT / 'build') a
     work = Path(directory)
     source = (ROOT / 'GRBrowser.swift').read_text().split('// MARK: - App Delegate')[0]
     main = work / 'main.swift'
-    main.write_text(source + '\n' + (ROOT / 'tests/DownloadTests.swift').read_text() + '\n' + (ROOT / 'tests/SettingsTests.swift').read_text())
+    main.write_text(source + '\n' + (ROOT / 'tests/DownloadTests.swift').read_text() + '\n' + (ROOT / 'tests/SettingsTests.swift').read_text() + '\n' + (ROOT / 'tests/BluetoothTests.swift').read_text())
     bundle = work / 'GRBrowserChecks.app'
     contents = bundle / 'Contents'
     (contents / 'MacOS').mkdir(parents=True)
     shutil.copy2(ROOT / 'Info.plist', contents / 'Info.plist')
     binary = contents / 'MacOS' / 'GRBrowser'
     subprocess.run([
-        'xcrun', 'swiftc', str(main), '-o', str(binary),
+        'xcrun', 'swiftc', str(main), str(ROOT / 'CameraBluetooth.swift'),
+        str(ROOT / 'CoreBluetoothTransport.swift'), str(ROOT / 'BluetoothConnection.swift'), '-o', str(binary),
         '-module-cache-path', str(ROOT / 'build/ModuleCache'),
         '-target', f'{platform.machine()}-apple-macosx13.3',
-        '-framework', 'CoreWLAN', '-framework', 'CoreLocation', '-framework', 'Security',
+        '-framework', 'SystemConfiguration', '-framework', 'CoreBluetooth', '-framework', 'CoreWLAN', '-framework', 'CoreLocation', '-framework', 'Security',
         '-framework', 'Cocoa', '-framework', 'WebKit', '-framework', 'UniformTypeIdentifiers',
     ], check=True)
     subprocess.run(['codesign', '--force', '--sign', '-', str(bundle)], check=True)

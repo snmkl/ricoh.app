@@ -204,7 +204,7 @@ func js(_ script: String, on target: WKWebView? = nil) -> Any? {
     var problem: Error?
     (target ?? web).evaluateJavaScript(script) { value, error in result = value; problem = error; done = true }
     waitFor("JavaScript evaluation") { done }
-    check(problem == nil, "JavaScript: \(problem?.localizedDescription ?? "")")
+    check(problem == nil, "JavaScript: \(problem.map { ($0 as NSError).userInfo.description } ?? "") in \(script.prefix(180))")
     return result
 }
 func jsCheck(_ expression: String, _ message: String) {
