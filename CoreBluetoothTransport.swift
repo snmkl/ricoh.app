@@ -26,7 +26,7 @@ final class CoreBluetoothTransport: NSObject, BluetoothTransport, CBCentralManag
     var state: String {
         switch CBManager.authorization {
         case .denied, .restricted: return "Bluetooth access denied. Enable GRBrowser in System Settings → Privacy & Security → Bluetooth."
-        case .notDetermined: return "Bluetooth not enabled for this app"
+        case .notDetermined: return "Bluetooth not enabled"
         default: break
         }
         guard let manager = manager else { return "Bluetooth available" }

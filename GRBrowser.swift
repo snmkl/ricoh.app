@@ -544,7 +544,16 @@ let SETTINGS_HTML: String = ###"""
 <style>
   :root { color-scheme: light dark; font: 13px -apple-system, BlinkMacSystemFont, sans-serif; }
   * { box-sizing: border-box; }
-  body { margin: 0; padding: 22px 24px; background: #f3f3f3; color: #222; }
+  body { margin: 0; padding: 22px 24px; background: #f3f3f3; color: #222; height: 100vh; display: flex; }
+  main { flex: 1; min-width: 0; min-height: 0; display: flex; flex-direction: column; }
+  main > :not(.device-section), .device-section > :not(.settings-list) { flex-shrink: 0; }
+  .device-section { display: flex; flex-direction: column; flex: 1 1 auto; min-height: 0; }
+  .device-controls { display: flex; align-items: center; gap: 12px; }
+  .device-controls > p { flex: 1; min-width: 0; margin: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .device-controls > button { flex-shrink: 0; }
+  #bluetoothTitle { margin-bottom: 6px; }
+  .bluetooth-instructions { margin: 0 0 8px; }
+  .bluetooth-instructions small { line-height: 1.4; }
   @media (prefers-color-scheme: dark) { body { background: #252525; color: #eee; } }
   h2 { font-size: 14px; margin: 0 0 12px; }
   section + section { border-top: 1px solid #8885; margin-top: 20px; padding-top: 18px; }
@@ -552,12 +561,21 @@ let SETTINGS_HTML: String = ###"""
   button, select { font: inherit; min-height: 26px; }
   button { padding: 3px 12px; }
   #folderPath { display: block; font-size: 12px; overflow-wrap: anywhere; margin-bottom: 8px; }
+  .settings-list { list-style: none; margin: 10px 0 0; padding: 0; height: 134px; min-height: 46px;
+    overflow-y: auto; border: 1px solid #8885; border-radius: 6px; }
   .known-network { display: flex; gap: 12px; align-items: center; justify-content: space-between;
-    border-top: 1px solid #8884; padding: 10px 0; }
-  .network-description { min-width: 0; overflow-wrap: anywhere; }
+    height: 44px; padding: 4px 10px; }
+  .known-network + .known-network { border-top: 1px solid #8884; }
+  .network-description { min-width: 0; }
+  .network-description > * { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .empty-list { padding: 12px 10px; opacity: 0.7; }
+  .remove-device { display: flex; align-items: center; justify-content: center; flex: 0 0 28px;
+    width: 28px; height: 28px; padding: 4px; border: 0; border-radius: 4px; background: transparent; color: inherit; }
+  .remove-device:hover:enabled { background: #8883; }
+  .remove-device:disabled { opacity: 0.35; }
+  .remove-device svg { width: 16px; height: 16px; }
   small, #networkNotice { opacity: 0.7; font-size: 11px; line-height: 1.5; }
   #settingsError { color: #d33; font-size: 12px; }
-  footer { display: flex; justify-content: flex-end; margin-top: 18px; }
 </style></head><body>
 <main aria-label="Settings">
   <section aria-labelledby="downloadsTitle">
@@ -569,47 +587,77 @@ let SETTINGS_HTML: String = ###"""
       <option value="zip">ZIP archive</option><option value="separate">Separate files</option>
     </select>
   </section>
-  <section aria-labelledby="bluetoothTitle">
-    <h2 id="bluetoothTitle">Bluetooth cameras · Experimental</h2>
-    <p><small>Enable Bluetooth on the camera, choose Pairing, and complete the macOS passkey prompt when connecting. Set Action Mode to On anytime to connect while the camera is off.</small></p>
-    <p id="bluetoothNotice" role="status"></p>
-    <button id="findBluetoothButton" onclick="appMessage('findBluetooth')">Enable Bluetooth / Find cameras…</button>
-    <div id="knownBluetooth">No Bluetooth cameras remembered yet.</div>
+  <section class="device-section" aria-labelledby="bluetoothTitle">
+    <h2 id="bluetoothTitle">Bluetooth cameras</h2>
+    <p class="bluetooth-instructions"><small>Enable Bluetooth on the camera, choose Pairing, and complete the macOS passkey prompt when connecting. Set Action Mode to On anytime to connect while the camera is off.</small></p>
+    <div class="device-controls">
+      <p id="bluetoothNotice" role="status"></p>
+      <button id="findBluetoothButton" onclick="appMessage('findBluetooth')">Enable Bluetooth / Find cameras…</button>
+    </div>
+    <ul id="knownBluetooth" class="settings-list" aria-labelledby="bluetoothTitle" tabindex="0"><li class="empty-list">No Bluetooth cameras remembered yet.</li></ul>
   </section>
-  <section aria-labelledby="networksTitle">
+  <section class="device-section" aria-labelledby="networksTitle">
     <h2 id="networksTitle">Known camera networks</h2>
-    <div id="knownNetworks">No camera networks remembered yet.</div>
-    <p id="networkNotice"></p>
-    <button id="discoverButton" onclick="appMessage('discover')">Enable Wi-Fi discovery…</button>
+    <div class="device-controls">
+      <p id="networkNotice"></p>
+      <button id="discoverButton" onclick="appMessage('discover')">Enable Wi-Fi discovery…</button>
+    </div>
+    <ul id="knownNetworks" class="settings-list" aria-labelledby="networksTitle" tabindex="0"><li class="empty-list">No camera networks remembered yet.</li></ul>
   </section>
   <p id="settingsError" role="alert"></p>
-  <footer><button id="settingsClose" onclick="appMessage('closeSettings')">Close</button></footer>
 </main>
 <script>
 function appMessage(action, value = {}) { window.webkit.messageHandlers.app.postMessage({action, ...value}); }
 function _appError(message) { document.getElementById('settingsError').textContent = message; }
-function _settingsChanged(value) {
-  document.getElementById('bluetoothNotice').textContent = value.bluetoothState || 'Bluetooth access is requested only when you choose Find cameras.';
-  document.getElementById('findBluetoothButton').disabled = !!value.bluetoothControlsDisabled;
+function settingsContentHeight() {
+  // Measure three rows per list; flex layout shortens the lists on smaller screens.
+  document.body.style.height = 'auto';
+  const height = Math.ceil(document.body.getBoundingClientRect().height);
+  document.body.style.height = '100vh';
+  return height;
+}
+function removeDeviceButton(label) {
+  const button = document.createElement('button'); button.type = 'button'; button.className = 'remove-device';
+  button.setAttribute('aria-label', label); button.title = label;
+  button.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 6h18M9 6V3h6v3M5 6l1 15h12l1-15M10 10v7M14 10v7"/></svg>';
+  return button;
+}
+function emptyList(list, message) {
+  const row = document.createElement('li'); row.className = 'empty-list'; row.textContent = message;
+  list.appendChild(row);
+}
+function renderBluetoothList(cameras) {
   const bluetoothList = document.getElementById('knownBluetooth');
+  const records = JSON.stringify(cameras);
+  if (bluetoothList.dataset.records === records) return;
+  bluetoothList.dataset.records = records;
   bluetoothList.replaceChildren();
-  for (const camera of value.bluetoothCameras || []) {
-    const row = document.createElement('div'); row.className = 'known-network';
+  for (const camera of cameras) {
+    const row = document.createElement('li'); row.className = 'known-network';
     const label = document.createElement('div'); label.className = 'network-description';
-    label.textContent = `${camera.name} (${camera.deviceName}) · ${camera.status}`;
+    const name = document.createElement('div'); name.textContent = camera.name;
+    const detail = document.createElement('small'); detail.textContent = `${camera.deviceName} · ${camera.status}`;
+    label.append(name, detail); label.title = `${camera.name} (${camera.deviceName}) · ${camera.status}`;
     row.appendChild(label);
     if (camera.remembered) {
-      const button = document.createElement('button'); button.textContent = 'Forget camera';
-      button.disabled = camera.active; button.title = camera.active ? 'Disconnect and finish active operations before forgetting this camera.' : '';
-      button.setAttribute('aria-label', `Forget camera ${camera.name}`);
+      const button = removeDeviceButton(`Forget camera ${camera.name}`);
+      button.disabled = camera.active;
+      if (camera.active) button.title = 'Disconnect and finish active operations before forgetting this camera.';
       button.onclick = () => appMessage('forgetBluetooth', {id:camera.deviceID}); row.appendChild(button);
     }
     bluetoothList.appendChild(row);
   }
-  if (!bluetoothList.children.length) bluetoothList.textContent = 'No Bluetooth cameras remembered yet.';
+  if (!cameras.length) emptyList(bluetoothList, 'No Bluetooth cameras remembered yet.');
+}
+function _settingsChanged(value) {
+  document.getElementById('bluetoothNotice').textContent = value.bluetoothState || 'Bluetooth access is requested only when you choose Find cameras.';
+  document.getElementById('bluetoothNotice').title = document.getElementById('bluetoothNotice').textContent;
+  document.getElementById('findBluetoothButton').disabled = !!value.bluetoothControlsDisabled;
+  renderBluetoothList(value.bluetoothCameras || []);
   document.getElementById('folderPath').textContent = value.folder || 'Choose a download folder';
   document.getElementById('exportFormat').value = value.format;
   document.getElementById('networkNotice').textContent = value.notice || 'Remembered after a successful camera connection.';
+  document.getElementById('networkNotice').title = document.getElementById('networkNotice').textContent;
   document.getElementById('discoverButton').textContent = value.discoveryAllowed ? 'Refresh Wi-Fi discovery' : 'Enable Wi-Fi discovery…';
   const list = document.getElementById('knownNetworks');
   const records = JSON.stringify(value.networks);
@@ -617,19 +665,20 @@ function _settingsChanged(value) {
   list.dataset.records = records;
   list.replaceChildren();
   for (const network of value.networks) {
-    const row = document.createElement('div'); row.className = 'known-network';
+    const row = document.createElement('li'); row.className = 'known-network';
     const description = document.createElement('div'); description.className = 'network-description';
     const name = document.createElement('div'); name.textContent = network.name;
     const last = document.createElement('small');
     last.textContent = `Last connected: ${new Date(network.lastConnected * 1000).toLocaleString()}`;
     description.append(name, last);
-    const forget = document.createElement('button'); forget.textContent = network.forgetting ? 'Forgetting…' : 'Forget';
+    description.title = `${network.name} · ${last.textContent}`;
+    const forget = removeDeviceButton(`Forget ${network.name}`);
     forget.disabled = network.forgetting;
-    forget.setAttribute('aria-label', `Forget ${network.name}`);
+    if (network.forgetting) { forget.title = 'Forgetting…'; forget.setAttribute('aria-busy', 'true'); }
     forget.onclick = () => appMessage('forget', {id:network.id});
     row.append(description, forget); list.appendChild(row);
   }
-  if (!value.networks.length) list.textContent = 'No camera networks remembered yet.';
+  if (!value.networks.length) emptyList(list, 'No camera networks remembered yet.');
 }
 document.addEventListener('keydown', event => {
   if (event.key === 'Escape' || (event.metaKey && event.key.toLowerCase() === 'w')) {
@@ -1926,9 +1975,14 @@ private final class WeakSettingsHandler: NSObject, WKScriptMessageHandler {
     }
 }
 
-final class SettingsWindowController: NSWindowController, NSWindowDelegate {
+final class SettingsWindowController: NSWindowController, NSWindowDelegate, WKNavigationDelegate {
     let webView: WKWebView
+    private let onClose: () -> Void
+    private var contentReady = false
+    private var presentationRequested = false
+    private var pendingPresentation: (() -> Void)?
     init(handler: AppController) {
+        onClose = { [weak handler] in handler?.webView?.evaluateJavaScript("_settingsClosed()") }
         let config = WKWebViewConfiguration()
         config.userContentController.add(WeakSettingsHandler(handler), name: "app")
         webView = WKWebView(frame: .zero, configuration: config)
@@ -1942,21 +1996,61 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate {
         panel.initialFirstResponder = webView
         super.init(window: panel)
         panel.delegate = self
+        webView.navigationDelegate = self
         webView.loadHTMLString(SETTINGS_HTML, baseURL: nil)
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
-    func present(relativeTo parent: NSWindow?) {
-        guard let window = window, NSApplication.shared.modalWindow == nil else { return }
+    func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+        contentReady = true
+        let presentation = pendingPresentation
+        pendingPresentation = nil
+        presentation?()
+    }
+
+    func present(relativeTo parent: NSWindow?, settings: [String: Any]) {
+        guard !presentationRequested, let window = window, NSApplication.shared.modalWindow == nil,
+              let data = try? JSONSerialization.data(withJSONObject: settings),
+              let json = String(data: data, encoding: .utf8) else { return }
+        presentationRequested = true
+        let presentation = { [weak self, weak parent] in
+            guard let self = self else { return }
+            // Measure the populated form at its opening width, including body padding.
+            window.setContentSize(NSSize(width: 480, height: 540))
+            self.webView.evaluateJavaScript("_settingsChanged(\(json)); settingsContentHeight()") { [weak self, weak parent] value, _ in
+                guard let height = value as? Double else {
+                    self?.presentationRequested = false
+                    return
+                }
+                // Enter the modal loop after the WebKit callback has returned.
+                RunLoop.main.perform { [weak self, weak parent] in
+                    self?.presentSized(relativeTo: parent, contentHeight: height)
+                }
+            }
+        }
+        if contentReady { presentation() } else { pendingPresentation = presentation }
+    }
+
+    private func presentSized(relativeTo parent: NSWindow?, contentHeight: Double) {
+        defer { presentationRequested = false }
+        guard let window = window, NSApplication.shared.modalWindow == nil,
+              let screen = parent?.screen ?? window.screen ?? NSScreen.main else { return }
+        let visibleFrame = screen.visibleFrame
+        let titleBarHeight = window.frame.height - window.contentLayoutRect.height
+        window.setContentSize(NSSize(width: 480, height: min(max(360, contentHeight), visibleFrame.height - titleBarHeight)))
         window.center()
         if let parent = parent {
             window.setFrameOrigin(NSPoint(x: parent.frame.midX - window.frame.width / 2,
                                           y: parent.frame.midY - window.frame.height / 2))
         }
+        // Keep the full window on screen when its parent is near an edge.
+        window.setFrameOrigin(NSPoint(x: max(visibleFrame.minX, min(window.frame.minX, visibleFrame.maxX - window.frame.width)),
+                                      y: max(visibleFrame.minY, min(window.frame.minY, visibleFrame.maxY - window.frame.height))))
         window.makeKeyAndOrderFront(nil)
         NSApplication.shared.runModal(for: window)
         window.orderOut(nil)
         parent?.makeKeyAndOrderFront(nil)
+        onClose()
     }
     func windowShouldClose(_ sender: NSWindow) -> Bool { sender.attachedSheet == nil }
     func windowWillClose(_ notification: Notification) {
@@ -2022,8 +2116,7 @@ final class AppController: NSObject, WKScriptMessageHandler {
             guard NSApplication.shared.modalWindow == nil, self.webView?.window?.attachedSheet == nil else { return }
             self.pushSettings()
             self.connection.refresh()
-            self.settingsController?.present(relativeTo: self.webView?.window)
-            self.webView?.evaluateJavaScript("_settingsClosed()")
+            self.settingsController?.present(relativeTo: self.webView?.window, settings: self.connection.settingsValue())
         }
     }
     private func showError(_ error: Error) {

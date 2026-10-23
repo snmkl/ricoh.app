@@ -549,9 +549,14 @@ _ = js("openSettings();")
 waitFor("native settings request") { appBridge.requests.contains { $0["action"] as? String == "openSettings" } }
 jsCheck("document.getElementById('settingsPanel') === null", "Settings is not an HTML modal inside the browser")
 check(js("document.getElementById('folderPath').textContent === '/chosen/photos' && document.getElementById('exportFormat').value === 'separate'", on: settingsWeb) as? Bool == true, "Settings display authoritative values in their own page")
-check(js("document.getElementById('knownNetworks').querySelector('img') === null && document.querySelector('.network-description').textContent.includes('GR_<camera>')", on: settingsWeb) as? Bool == true, "Network names render as text")
-check(js("document.documentElement.scrollWidth <= 400 && document.getElementById('settingsClose').getAttribute('onclick').includes('closeSettings')", on: settingsWeb) as? Bool == true, "Settings form fits its narrow window and exposes Close")
-_ = js("document.querySelector('#knownNetworks button').click(); document.getElementById('settingsClose').click();", on: settingsWeb)
+check(js("document.getElementById('knownNetworks').querySelector('img') === null && document.querySelector('#knownNetworks .network-description').textContent.includes('GR_<camera>')", on: settingsWeb) as? Bool == true, "Network names render as text")
+_ = js("renderBluetoothList([{name:'GR_<Bluetooth>',deviceName:'GR IIIx',status:'Remembered',remembered:true,active:false,deviceID:'bt-remove-fixture'},{name:'Active camera',deviceName:'GR IIIx',status:'Connected',remembered:true,active:true,deviceID:'bt-active-fixture'}]);", on: settingsWeb)
+check(js("Array.from(document.querySelectorAll('.remove-device')).every(button => button.querySelector('svg') && button.textContent === '' && button.getAttribute('aria-label') && button.title) && document.querySelectorAll('#knownBluetooth button')[1].disabled", on: settingsWeb) as? Bool == true,
+      "Removal uses labeled icons and keeps active Bluetooth cameras protected")
+_ = js("document.querySelector('#knownBluetooth button').click();", on: settingsWeb)
+waitFor("Bluetooth forget icon bridge") { appBridge.requests.contains { $0["action"] as? String == "forgetBluetooth" && $0["id"] as? String == "bt-remove-fixture" } }
+check(js("document.documentElement.scrollWidth <= 400 && document.getElementById('settingsClose') === null", on: settingsWeb) as? Bool == true, "Settings form fits its narrow window without a redundant Close button")
+_ = js("document.querySelector('#knownNetworks button').click(); document.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true}));", on: settingsWeb)
 waitFor("forget bridge") { appBridge.requests.contains { $0["action"] as? String == "forget" } }
 waitFor("close native settings request") { appBridge.requests.contains { $0["action"] as? String == "closeSettings" } }
 _ = js("_settingsClosed();")
@@ -678,6 +683,9 @@ exerciseSettings { controller in
     check(controller.window?.styleMask.contains(.titled) == true
           && controller.window?.standardWindowButton(.closeButton)?.isEnabled == true
           && controller.window?.standardWindowButton(.closeButton)?.isHidden == false, "Settings has native window chrome and a visible close button")
+    check(js("document.documentElement.scrollHeight <= window.innerHeight && document.documentElement.scrollWidth <= window.innerWidth", on: controller.webView) as? Bool == true,
+          "Settings opens large enough for the populated form without scrolling")
+    check(controller.window!.screen!.visibleFrame.contains(controller.window!.frame), "Settings opens entirely within the available screen")
     check(js("document.getElementById('exportFormat').value", on: controller.webView) as? String == "zip", "Native Settings starts from stored preferences")
     _ = js("document.getElementById('exportFormat').value='separate'; document.getElementById('exportFormat').dispatchEvent(new Event('change'));", on: controller.webView)
     waitFor("format updates during native modal loop") { livePrefs.format == .separate }
@@ -687,9 +695,14 @@ exerciseSettings { controller in
     check(controller.window!.performKeyEquivalent(with: event), "Native Settings handles Command-W")
 }
 let originalSettings = liveController.settingsController
+let initialSettingsHeight = originalSettings!.window!.frame.height
+livePrefs.remember(cameraA, at: Date(timeIntervalSince1970: 2))
 exerciseSettings { controller in
     check(controller === originalSettings && js("document.getElementById('exportFormat').value", on: controller.webView) as? String == "separate",
           "Reopening reuses Settings and retains the saved format")
+    check(controller.window!.frame.height == initialSettingsHeight
+          && js("document.documentElement.scrollHeight <= window.innerHeight", on: controller.webView) as? Bool == true,
+          "Additional remembered networks preserve the default list and window size")
     controller.window?.standardWindowButton(.closeButton)?.performClick(nil)
 }
 exerciseSettings { controller in controller.window?.cancelOperation(nil) }
@@ -703,9 +716,27 @@ exerciseSettings { controller in
     controller.window!.endSheet(sheet)
     sheet.orderOut(nil)
     waitFor("settings child sheet ends") { controller.window?.attachedSheet == nil }
-    _ = js("document.getElementById('settingsClose').click();", on: controller.webView)
+    _ = js("document.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true}));", on: controller.webView)
 }
 print("PASS: native Settings modal, visible title-bar close, Command-W, Escape, child sheet, reopening, and preference updates")
+for index in 0..<30 { livePrefs.remember(CameraNetwork(name: "GR_fixture_\(index)"), at: Date(timeIntervalSince1970: 3)) }
+exerciseSettings { controller in
+    var listSettings = liveConnection.settingsValue()
+    listSettings["bluetoothCameras"] = (0..<12).map { index in
+        ["name": "GR Bluetooth \(index)", "deviceName": "GR IIIx", "status": "Remembered", "remembered": true, "active": false, "deviceID": "bt-\(index)"] as [String: Any]
+    }
+    let listJSON = String(data: try! JSONSerialization.data(withJSONObject: listSettings), encoding: .utf8)!
+    _ = js("_settingsChanged(\(listJSON));", on: controller.webView)
+    check(controller.window!.screen!.visibleFrame.contains(controller.window!.frame)
+          && js("document.documentElement.scrollHeight <= window.innerHeight && Array.from(document.querySelectorAll('.settings-list')).every(list => list.tagName === 'UL' && list.scrollHeight > list.clientHeight && list.clientHeight <= 132 && Array.from(list.children).every(row => row.tagName === 'LI'))", on: controller.webView) as? Bool == true,
+          "Long Bluetooth and Wi-Fi lists scroll inside the Settings window")
+    check(js("Array.from(document.querySelectorAll('.settings-list')).every(list => { list.scrollTop = 88; return list.scrollTop > 0; })", on: controller.webView) as? Bool == true,
+          "Both device lists can scroll independently")
+    _ = js("_settingsChanged(\(listJSON));", on: controller.webView)
+    check(js("Array.from(document.querySelectorAll('.settings-list')).every(list => list.scrollTop > 0)", on: controller.webView) as? Bool == true,
+          "Unchanged settings updates preserve list scroll positions")
+    controller.window?.performClose(nil)
+}
 _ = js("photos=[{dir:'DCIM',file:'live-one.JPG'},{dir:'DCIM',file:'live-two.JPG'}]; selAll(); dlSelected();", on: liveWeb)
 waitFor("download starts before opening Settings") { liveDownload.isDownloading }
 exerciseSettings { controller in
