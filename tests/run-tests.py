@@ -3,7 +3,9 @@
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 import json
-import platform
+import importlib.util
+import sys
+sys.dont_write_bytecode = True
 import socket
 import shutil
 import subprocess
@@ -59,22 +61,15 @@ class CameraFixture(BaseHTTPRequestHandler):
 (ROOT / 'build').mkdir(exist_ok=True)
 with tempfile.TemporaryDirectory(prefix='download-tests-', dir=ROOT / 'build') as directory:
     work = Path(directory)
-    source = (ROOT / 'GRBrowser.swift').read_text().split('// MARK: - App Delegate')[0]
-    main = work / 'main.swift'
-    main.write_text(source + '\n' + (ROOT / 'tests/DownloadTests.swift').read_text() + '\n' + (ROOT / 'tests/SettingsTests.swift').read_text() + '\n' + (ROOT / 'tests/BluetoothTests.swift').read_text())
     bundle = work / 'GRBrowserChecks.app'
     contents = bundle / 'Contents'
     (contents / 'MacOS').mkdir(parents=True)
     shutil.copy2(ROOT / 'Info.plist', contents / 'Info.plist')
     binary = contents / 'MacOS' / 'GRBrowser'
-    subprocess.run([
-        'xcrun', 'swiftc', str(main), str(ROOT / 'CameraBluetooth.swift'),
-        str(ROOT / 'CoreBluetoothTransport.swift'), str(ROOT / 'BluetoothConnection.swift'), '-o', str(binary),
-        '-module-cache-path', str(ROOT / 'build/ModuleCache'),
-        '-target', f'{platform.machine()}-apple-macosx13.3',
-        '-framework', 'SystemConfiguration', '-framework', 'CoreBluetooth', '-framework', 'CoreWLAN', '-framework', 'CoreLocation', '-framework', 'Security',
-        '-framework', 'Cocoa', '-framework', 'WebKit', '-framework', 'UniformTypeIdentifiers',
-    ], check=True)
+    spec = importlib.util.spec_from_file_location('swift_build', ROOT / 'swift-build.py')
+    build = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(build)
+    build.compile_swift(binary, tests=True)
     subprocess.run(['codesign', '--force', '--sign', '-', str(bundle)], check=True)
     server = ThreadingHTTPServer(('127.0.0.1', 0), CameraFixture)
     threading.Thread(target=server.serve_forever, daemon=True).start()

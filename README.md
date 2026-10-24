@@ -6,12 +6,16 @@ A native macOS app to browse and download photos from your Ricoh GR IIIx over Wi
 
 The GR IIIx runs a small HTTP server on `192.168.0.1:80` when Wi-Fi is enabled. The official Ricoh GR app is just a client for this API. This app does the same thing, but on your laptop.
 
-A `WKWebView` renders the UI. A custom URL scheme handler (`gr-cam://`) intercepts API calls and forwards them to the camera via `URLSession` — no proxy server, no CORS issues, no dependencies.
+SwiftUI renders the browser and Settings inside AppKit windows. Camera verification,
+image loading, and original downloads use independent `URLSession` policies. No web
+view or proxy server is required. Thumbnail and preview requests share a two-request
+scheduler and a 64 MiB decoded-image cache; thumbnails are downsampled in memory.
 
 ## Requirements
 
 - macOS 13.3 or later (Apple Silicon or Intel)
 - Xcode Command Line Tools (`xcode-select --install`) for building
+- Python 3 for the shared build helper and fixture runner
 
 ## Build & Run
 
@@ -35,9 +39,22 @@ Binary lands in `build/GRBrowser`.
 1. Turn on Wi-Fi on your GR IIIx (Menu → Wireless → Wi-Fi)
 2. Connect your Mac to the camera's network (SSID shown on camera screen)
 3. Open the app, select **Current Wi-Fi**, and hit **CONNECT**
-4. Browse thumbnails, click to preview, select multiple, download as zip
+4. Browse the grid or list, click a photo to preview, and use checkboxes to select photos.
+5. Use **Select all**, **Clear selection** (the circled ×), or **Download**. Batches follow displayed order.
+
+Preview provides previous/next and **Download original**. Left/Right and Escape work
+when preview owns keyboard focus; click its image to return keyboard focus there.
+Closing preview returns focus to the active gallery photo. Browsing and selection
+remain available during exports, with shared progress above the preview. Failed
+images have a placeholder and a **Retry image** context-menu action.
+
+Finder-style Command/Shift selection is a separate, unimplemented change.
 
 ### Connect via Bluetooth
+
+Bluetooth handoff remains experimental. Automated protocol and fixture checks pass;
+physical pairing, camera firmware behavior, and AP stability still require camera
+validation. Manual Current Wi-Fi access remains available.
 
 1. Enable camera Bluetooth, enter Pairing, and set its Action Mode to **On anytime** if you want to connect while the body is off.
 2. Choose **Find cameras…** in the app and allow Bluetooth access. Select your camera in the connection selector.
@@ -56,6 +73,9 @@ save directly to that folder. Nearby remembered camera networks appear in the
 selector; select one to join its Wi-Fi before connecting to the camera.
 Remove remembered networks with **Forget** in Settings. **Forget camera** removes
 only the app's Bluetooth history; it leaves macOS pairing and Wi-Fi history intact.
+Settings is a reusable native modal with a scrollable form and independent device
+lists. Close it with its title-bar button, Command-W, or Escape. Its folder picker
+attaches as a sheet; closing Settings leaves active exports running.
 
 ## API Endpoints
 
@@ -77,13 +97,53 @@ Discovered via firmware reverse engineering ([source](https://notes.secretsauce.
 
 **Connection failed** — Make sure you're connected to the camera's Wi-Fi network, not your regular network. The camera IP is `192.168.0.1` by default.
 
-**Empty grid** — The `/v1/photos` response shape may vary across firmware versions. Open Safari Web Inspector (Develop → GRBrowser) and check the console for the raw JSON. Open an issue with the output.
+**Empty grid** — An empty camera library shows “No photos on this camera.” Invalid or unavailable photo lists show a connection error. Include the displayed error and camera model/firmware when reporting an issue.
 
 **Camera not found over Bluetooth** — Check that camera Bluetooth is enabled, move it closer, and disconnect any phone app using it. Use **On anytime** for connection while the camera is off.
 
-**Pairing or automatic connection failed** — Follow the camera's pairing instructions and complete the macOS passkey prompt. Check Mac Bluetooth, Wi-Fi and Location Services permissions. If the camera rejects automatic Wi-Fi activation, choose **Use camera Wi-Fi** and connect manually.
+**Pairing or automatic connection failed** — Follow the camera's pairing instructions and complete the macOS passkey prompt. Check Mac Bluetooth, Wi-Fi and Location Services permissions. If the camera rejects automatic Wi-Fi activation, choose **Use manual Wi-Fi** and connect manually.
 
 **Slow thumbnails** — The camera's Wi-Fi is 2.4GHz and not fast. Thumbnails load lazily; give it a few seconds.
+
+## Architecture and validation
+
+- `AppDelegate.swift` owns bootstrap, menus and the main AppKit window;
+  `AppController.swift` owns modal/sheet presentation and platform lifecycle hooks.
+- `BrowserModel.swift`, `NativeBrowser.swift`, and `NativeSettings.swift` provide
+  observable presentation state and native views. Gallery identity uses directory
+  plus filename, independently of image request completion.
+- `Preferences.swift` retains the `settings.v1` record format;
+  `CameraBluetooth.swift` retains `bluetooth-cameras.v1`. Bundle identity remains
+  `local.GRBrowser`; this refactor requires no preference migration.
+- `CameraConnection.swift` owns operation admission and verified sessions.
+  `CameraDiscovery.swift` observes networks/devices without waking or joining;
+  `SessionHealthMonitor.swift` reports health while the coordinator owns invalidation
+  and history revisions. Platform and credential adapters live in `PlatformAccess.swift`.
+- `CameraAPI.swift` centralizes encoded endpoints and User-Agent.
+  `CameraHTTP.swift`, `CameraImageLoader.swift`, and `DownloadService.swift` retain
+  separate verification, image, and original-transfer sessions. Downloads stage
+  complete files, validate ZIPs, and publish without replacing existing outputs.
+- `swift-build.py` is the shared source/framework/target/module-cache manifest for
+  `make build`, `./build.sh`, and tests. Bundle staging, icons, signing and optional
+  installation remain in `build.sh`.
+
+Run all tests with:
+
+```sh
+python3 tests/run-tests.py
+```
+
+The runner compiles ordinary application sources with callable test suites and an
+explicit `tests/main.swift` driver. Tests use local HTTP fixtures, isolated preferences,
+fake radios/clocks, generated image fixtures, and real AppKit/SwiftUI hosts. They do
+not connect or wake a physical camera. Focused native checks are available with
+`GRBROWSER_TEST_SUITE=browser`, `settings`, or `images` before the same command.
+The runner needs localhost socket and macOS UI access; sandboxed builds may also
+need permission to launch the SwiftUI compiler macro plugin and `iconutil`.
+
+Hardware results and unverified manual checks are recorded separately in the active
+OpenSpec change's `validation.md`. Automated host/responder events do not establish
+real OS input, VoiceOver navigation, production preference contents, or camera behavior.
 
 ## Credits
 
@@ -94,4 +154,3 @@ Discovered via firmware reverse engineering ([source](https://notes.secretsauce.
 ## License
 
 MIT
-# ricoh.app

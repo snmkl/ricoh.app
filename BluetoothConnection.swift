@@ -11,28 +11,21 @@ extension CameraConnection {
     func isLive(_ job: Attempt) -> Bool { attempt === job && job.terminal == nil }
 
     func pollBluetooth(discover: Bool) {
-        guard discover, !isConnecting, canConnect(), !isConnected else { bluetooth.stopDiscovery(); return }
-        let first = nextBluetoothDiscovery == .distantPast
-        guard now() >= nextBluetoothDiscovery, first || !devices.cameras.isEmpty || selectedBluetooth != nil else { return }
-        nextBluetoothDiscovery = now().addingTimeInterval(30)
-        bluetooth.discover(explicit: false)
-        onChange?()
+        discovery.pollBluetooth(discover: discover, allowed: !isConnecting && canConnect() && !isConnected,
+            hasRemembered: !devices.cameras.isEmpty || selectedBluetooth != nil)
     }
-    func findBluetooth() {
-        guard !isConnecting, !isConnected, canConnect() else { return }
-        nextBluetoothDiscovery = now().addingTimeInterval(30)
-        bluetooth.discover(explicit: true); onChange?()
-    }
-    func selectTarget(_ target: String) {
-        guard !isConnecting, !isConnected, canConnect() else { return }
+    func findBluetooth() { discovery.findBluetooth(allowed: !isConnecting && !isConnected && canConnect()) }
+    @discardableResult func selectTarget(_ target: String) -> Bool {
+        guard !isConnecting, !isConnected, canConnect() else { return false }
         if target.hasPrefix("bt:"), let id = UUID(uuidString: String(target.dropFirst(3))) {
-            guard devices.cameras.contains(where: { $0.identity.id == id }) || bluetooth.observations.contains(where: { $0.id == id }) else { return }
+            guard devices.cameras.contains(where: { $0.identity.id == id }) || bluetooth.observations.contains(where: { $0.id == id }) else { return false }
             selectedBluetooth = id; devices.select(id)
         } else {
-            guard target.isEmpty || preferences.networks.contains(where: { $0.network.id == target }) else { return }
+            guard target.isEmpty || preferences.networks.contains(where: { $0.network.id == target }) else { return false }
             selectedBluetooth = nil; devices.select(nil)
         }
         selectionRevision += 1; manualRecovery = false; onChange?()
+        return true
     }
     func forgetBluetooth(_ raw: String) {
         guard let id = UUID(uuidString: raw), !isConnecting, canConnect(), session?.bluetoothID != id else { return }
@@ -43,18 +36,18 @@ extension CameraConnection {
     }
     func cancelConnection() {
         guard let job = attempt, isLive(job) else { return }
-        finish(job, phase: "cancelled", message: "Connection cancelled. Camera power or Wi-Fi may already have changed.")
+        finish(job, phase: .cancelled, message: "Connection cancelled. Camera power or Wi-Fi may already have changed.")
     }
     func disconnectSession() {
         guard !isConnecting, canConnect(), let connected = session else { return }
-        session = nil; healthCheck = nil; health.cancel(); scanGeneration += 1
-        onEvent?(["id": connected.id, "phase": "disconnected", "message": "Disconnected from camera. Wi-Fi association unchanged."])
+        session = nil; healthMonitor.cancel(); scanGeneration += 1
+        publish(ConnectionEvent(id: connected.id, phase: .disconnected, message: "Disconnected from camera. Wi-Fi association unchanged."))
         onChange?()
     }
     func computerWillSleep() {
         bluetooth.stopDiscovery()
         if let job = attempt, isLive(job) {
-            finish(job, phase: "cancelled", message: "Connection interrupted by sleep. Press CONNECT to try again.")
+            finish(job, phase: .cancelled, message: "Connection interrupted by sleep. Press CONNECT to try again.")
         }
     }
 
@@ -63,7 +56,7 @@ extension CameraConnection {
             finish(job, error: appError("That Bluetooth camera is no longer known. Use Find cameras.")); return
         }
         selectedBluetooth = id; devices.select(id); releasedBluetooth = nil
-        event(job, phase: "preparing", message: "Checking Wi-Fi access before Bluetooth setup…")
+        event(job, phase: .preparing, message: "Checking Wi-Fi access before Bluetooth setup…")
         authorization.request { allowed in
             guard self.isLive(job) else { return }
             guard allowed else {
@@ -81,7 +74,7 @@ extension CameraConnection {
                     }, progress: { message in
                         guard self.isLive(job) else { return }
                         self.bluetoothLabel = message
-                        self.event(job, phase: "bluetooth", message: message); self.onChange?()
+                        self.event(job, phase: .bluetooth, message: message); self.onChange?()
                     }, completion: { result in
                         guard self.isLive(job) else { return }
                         switch result {
@@ -105,7 +98,7 @@ extension CameraConnection {
 
     func seekBluetoothNetwork(_ job: Attempt) {
         guard isLive(job), let target = job.target, let deadline = job.deadline else { return }
-        event(job, phase: "waiting", message: "Waiting for camera Wi-Fi…")
+        event(job, phase: .waiting, message: "Waiting for camera Wi-Fi…")
         worker.async {
             let result = Result { try self.wifi.scan().first { $0.id == target } }
             let current = self.wifi.current()
@@ -125,7 +118,7 @@ extension CameraConnection {
 
     func joinBluetooth(_ job: Attempt, network: CameraNetwork, credentials: BluetoothWiFiCredentials) {
         guard isLive(job), job.target == network.id else { return }
-        event(job, phase: "joining", message: "Joining \(network.name)…")
+        event(job, phase: .joining, message: "Joining \(network.name)…")
         worker.async {
             guard !job.cancellation.isCancelled else { return }
             let result = Result { try self.wifi.join(network, password: credentials.password) }
@@ -154,12 +147,12 @@ extension CameraConnection {
         }
     }
 
-    func bluetoothSettings() -> [String: Any] {
+    func bluetoothSnapshot() -> (rows: [BluetoothSnapshot], name: String, status: String) {
         let observed = bluetooth.observations.filter { now().timeIntervalSince($0.seen) <= 45 }
         let active = attempt?.bluetoothID ?? session?.bluetoothID
         let display = active ?? selectedBluetooth ?? bluetooth.connectedID ?? observed.first(where: \.systemConnected)?.id
         let ids = Set(devices.cameras.map { $0.identity.id } + observed.map(\.id) + (display.map { [$0] } ?? []))
-        let rows = ids.map { id -> [String: Any] in
+        let rows = ids.map { id -> BluetoothSnapshot in
             let known = devices.cameras.first { $0.identity.id == id }
             let nearby = observed.first { $0.id == id }
             let status: String
@@ -169,18 +162,12 @@ extension CameraConnection {
             else if nearby?.systemConnected == true { status = "Connected on Mac" }
             else if nearby != nil { status = "Available" }
             else { status = "Remembered · Not seen" }
-            return ["id": "bt:" + id.uuidString, "deviceID": id.uuidString,
-                "name": known?.identity.model ?? nearby?.name ?? "Ricoh camera",
-                "deviceName": known?.identity.name ?? nearby?.name ?? "Ricoh camera", "status": status,
-                "remembered": known != nil, "active": active == id || isConnecting || !canConnect(),
-                "firmware": known?.identity.firmware ?? ""]
-        }.sorted { ($0["id"] as? String ?? "") < ($1["id"] as? String ?? "") }
-        let shown = rows.first { $0["deviceID"] as? String == display?.uuidString }
-        return ["bluetoothCameras": rows, "bluetoothState": bluetooth.state,
-            "bluetoothName": shown?["deviceName"] as? String ?? "", "bluetoothStatus": shown?["status"] as? String ?? "",
-            "preferredTarget": selectedBluetooth.map { "bt:" + $0.uuidString } ?? "",
-            "selectionRevision": selectionRevision, "connectionBusy": isConnecting, "cameraConnected": isConnected,
-            "connectionDraining": attempt?.terminal != nil, "connectionFinishing": attempt?.terminal == "completed", "manualRecovery": manualRecovery,
-            "bluetoothControlsDisabled": isConnecting || isConnected || !canConnect()]
+            return BluetoothSnapshot(id: id, model: known?.identity.model ?? nearby?.name ?? "Ricoh camera",
+                name: known?.identity.name ?? nearby?.name ?? "Ricoh camera", status: status,
+                remembered: known != nil, protected: active == id || isConnecting || !canConnect(),
+                firmware: known?.identity.firmware ?? "")
+        }.sorted { $0.id.uuidString < $1.id.uuidString }
+        let shown = rows.first { $0.id == display }
+        return (rows, shown?.name ?? "", shown?.status ?? "")
     }
 }
