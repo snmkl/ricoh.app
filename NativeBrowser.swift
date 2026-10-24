@@ -68,6 +68,7 @@ struct DownloadProgressView: View {
 // A responder local to the preview; selectors, fields, Settings and sheets retain their own keys.
 final class PreviewKeyResponder: NSView {
     var handle: (UInt16) -> Void = { _ in }
+    var onRestore: (() -> Void)?
     private weak var previous: NSResponder?
     var focusRevision = 0 { didSet { if oldValue != focusRevision { focus() } } }
     var photo: CameraPhoto? {
@@ -80,8 +81,13 @@ final class PreviewKeyResponder: NSView {
         if window.firstResponder !== self { previous = window.firstResponder }
         window.makeFirstResponder(self)
     }
+    override func viewWillMove(toWindow newWindow: NSWindow?) {
+        if newWindow == nil { restoreFocus() }
+        super.viewWillMove(toWindow: newWindow)
+    }
     func restoreFocus() {
         guard let window = window, window.firstResponder === self else { return }
+        if let onRestore = onRestore { onRestore(); return }
         if let view = previous as? NSView, view.window === window { window.makeFirstResponder(view) }
         else { window.makeFirstResponder(window.contentView) }
     }
@@ -96,10 +102,200 @@ final class PreviewKeyResponder: NSView {
 struct PreviewKeyboard: NSViewRepresentable {
     let photo: CameraPhoto
     let focusRevision: Int
+    var restore: (() -> Void)? = nil
     let handle: (UInt16) -> Void
     func makeNSView(context: Context) -> PreviewKeyResponder { PreviewKeyResponder() }
-    func updateNSView(_ view: PreviewKeyResponder, context: Context) { view.handle = handle; view.photo = photo; view.focusRevision = focusRevision }
+    func updateNSView(_ view: PreviewKeyResponder, context: Context) { view.handle = handle; view.onRestore = restore; view.photo = photo; view.focusRevision = focusRevision }
     static func dismantleNSView(_ view: PreviewKeyResponder, coordinator: ()) { view.restoreFocus() }
+}
+
+// Input stays in the gallery responder chain. No application-wide event monitors.
+@MainActor
+final class GalleryFocus: ObservableObject {
+    let items = NSHashTable<GalleryItemResponder>.weakObjects()
+    weak var entry: GalleryKeyResponder?
+    var pending: CameraPhoto?
+    var restoring = false
+    private weak var requestedFrom: NSResponder?
+    private var returningFromPreview = false
+    var ownsFocus: Bool {
+        guard let responder = entry?.window?.firstResponder else { return false }
+        return responder === entry || items.allObjects.contains { $0.ownsKeyboard }
+    }
+    func navigate(_ direction: GalleryDirection, model: BrowserModel, columns: Int) {
+        // Keep an enduring responder while lazy layout recycles the old endpoint.
+        // Once the destination exists, restore() transfers focus to its item.
+        if ownsFocus, let entry = entry { entry.window?.makeFirstResponder(entry) }
+        let previous = model.active
+        model.moveSelection(direction, columns: columns)
+        if previous == model.active { restore(model.active) }
+    }
+    func restore(_ photo: CameraPhoto?, afterPreview: Bool = false) {
+        returningFromPreview = afterPreview
+        pending = photo
+        requestedFrom = entry?.window?.firstResponder
+        fulfill()
+    }
+    func fulfill() {
+        guard let photo = pending, let item = items.allObjects.first(where: { $0.photo == photo }),
+              let window = item.window, NSApp.modalWindow == nil, window.attachedSheet == nil else { return }
+        let previewReturn = returningFromPreview && (window.firstResponder === window.contentView || window.firstResponder is PreviewKeyResponder || window.firstResponder == nil)
+        guard window.firstResponder === requestedFrom || ownsFocus || previewReturn else { pending = nil; return }
+        restoring = true
+        window.makeFirstResponder(item)
+        restoring = false
+        pending = nil
+    }
+}
+
+class GalleryKeyResponder: NSView {
+    var enabled: () -> Bool = { false }
+    var move: (GalleryDirection) -> Void = { _ in }
+    override var acceptsFirstResponder: Bool { true }
+    var ownsKeyboard: Bool { window?.firstResponder === self }
+    override func keyDown(with event: NSEvent) {
+        guard ownsKeyboard, enabled(), NSApp.modalWindow == nil,
+              window?.attachedSheet == nil, event.modifierFlags.contains(.shift),
+              event.modifierFlags.intersection([.command, .option, .control]).isEmpty,
+              let direction = GalleryDirection(keyCode: event.keyCode) else {
+            super.keyDown(with: event); return
+        }
+        move(direction)
+    }
+}
+
+// Native buttons retain keyboard/AX press actions. Pointer input goes through one
+// dispatcher, so a modified checkbox never also performs its ordinary toggle.
+final class GalleryButton: NSButton {
+    var click: (NSEvent.ModifierFlags) -> Void = { _ in }
+    var drawsContent = true
+    var spokenLabel = ""
+    override func isAccessibilityElement() -> Bool { true }
+    override func accessibilityLabel() -> String? { spokenLabel }
+    override func accessibilityTitle() -> String? { spokenLabel }
+    override var acceptsFirstResponder: Bool { true }
+    override func becomeFirstResponder() -> Bool {
+        let accepted = super.becomeFirstResponder()
+        if accepted { (superview as? GalleryItemResponder)?.directFocus() }
+        return accepted
+    }
+    override func keyDown(with event: NSEvent) {
+        if event.modifierFlags.contains(.shift), GalleryDirection(keyCode: event.keyCode) != nil {
+            (superview as? GalleryItemResponder)?.keyDown(with: event)
+        } else { super.keyDown(with: event) }
+    }
+    override func accessibilityPerformPress() -> Bool {
+        guard isEnabled else { return false }
+        return sendAction(action, to: target)
+    }
+    override func draw(_ dirtyRect: NSRect) { if drawsContent { super.draw(dirtyRect) } }
+    override func mouseDown(with event: NSEvent) { click(event.modifierFlags) }
+}
+
+final class GalleryItemResponder: GalleryKeyResponder {
+    var photo: CameraPhoto?
+    weak var focus: GalleryFocus?
+    var directFocus: () -> Void = {}
+    var interact: (Bool, NSEvent.ModifierFlags) -> Void = { _, _ in }
+    let previewButton = GalleryButton()
+    let checkbox = GalleryButton(checkboxWithTitle: "", target: nil, action: nil)
+    var list = false
+    override var ownsKeyboard: Bool {
+        super.ownsKeyboard || window?.firstResponder === previewButton || window?.firstResponder === checkbox
+    }
+    override var isFlipped: Bool { true }
+    override func accessibilityChildren() -> [Any]? { [previewButton, checkbox] }
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        previewButton.drawsContent = false
+        previewButton.target = self; previewButton.action = #selector(previewAction)
+        checkbox.target = self; checkbox.action = #selector(checkboxAction)
+        previewButton.click = { [weak self] flags in self?.dispatch(checkbox: false, flags: flags) }
+        checkbox.click = { [weak self] flags in self?.dispatch(checkbox: true, flags: flags) }
+        addSubview(previewButton); addSubview(checkbox)
+        setAccessibilityElement(true)
+        setAccessibilityRole(.group)
+    }
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+    override func layout() {
+        super.layout()
+        previewButton.frame = bounds
+        checkbox.frame = NSRect(x: list ? 8 : 7, y: list ? (bounds.height - 20) / 2 : bounds.height - 27,
+                                width: 20, height: 20)
+    }
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        // Leave the image's existing secondary-click Retry menu reachable.
+        if NSApp.currentEvent?.type == .rightMouseDown { return nil }
+        let local = convert(point, from: superview)
+        guard !isHidden, bounds.contains(local) else { return nil }
+        return checkbox.frame.contains(local) ? checkbox : previewButton
+    }
+    override func becomeFirstResponder() -> Bool {
+        let accepted = super.becomeFirstResponder()
+        if accepted && focus?.restoring != true { directFocus() }
+        return accepted
+    }
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        focus?.fulfill()
+    }
+    private func dispatch(checkbox: Bool, flags: NSEvent.ModifierFlags) {
+        guard NSApp.modalWindow == nil, window?.attachedSheet == nil, enabled() else { return }
+        focus?.restoring = true
+        window?.makeFirstResponder(self)
+        focus?.restoring = false
+        interact(checkbox, flags)
+    }
+    private func nativeAction(checkbox: Bool) {
+        guard NSApp.modalWindow == nil, window?.attachedSheet == nil, enabled() else { return }
+        // Keyboard and accessibility activation preserve the control's responder.
+        interact(checkbox, [])
+    }
+    @objc private func previewAction() { nativeAction(checkbox: false) }
+    @objc private func checkboxAction() { nativeAction(checkbox: true) }
+}
+
+struct GalleryEntry: NSViewRepresentable {
+    let focus: GalleryFocus
+    let enabled: () -> Bool
+    let move: (GalleryDirection) -> Void
+    func makeNSView(context: Context) -> GalleryKeyResponder { GalleryKeyResponder() }
+    func updateNSView(_ view: GalleryKeyResponder, context: Context) {
+        focus.entry = view; view.enabled = enabled; view.move = move
+        view.setAccessibilityLabel("Camera photo gallery")
+    }
+}
+
+struct GalleryItemInput: NSViewRepresentable {
+    let photo: CameraPhoto
+    @ObservedObject var model: BrowserModel
+    let focus: GalleryFocus
+    let columns: Int
+    func makeNSView(context: Context) -> GalleryItemResponder {
+        let view = GalleryItemResponder()
+        view.focus = focus; focus.items.add(view)
+        return view
+    }
+    func updateNSView(_ view: GalleryItemResponder, context: Context) {
+        view.photo = photo; view.list = model.listView
+        view.enabled = { model.preview == nil }
+        view.directFocus = { model.focusPhoto(photo) }
+        view.move = { focus.navigate($0, model: model, columns: columns) }
+        view.interact = { checkbox, flags in
+            if flags.contains(.shift) { model.selectRange(to: photo) }
+            else if flags.contains(.command) || checkbox { model.toggle(photo) }
+            else { model.openPreview(photo) }
+        }
+        view.checkbox.state = model.selected.contains(photo) ? .on : .off
+        view.checkbox.spokenLabel = "Select " + photo.file
+        view.previewButton.spokenLabel = "Preview " + photo.file
+        view.setAccessibilityLabel(photo.file + " · " + photo.dir)
+        view.setAccessibilitySelected(model.selected.contains(photo))
+        view.setAccessibilityValue(model.active == photo ? "Active photo" : "")
+        view.needsLayout = true
+        // Finish lazy endpoint focus after the representable joins its host window.
+        DispatchQueue.main.async { [weak focus] in focus?.fulfill() }
+    }
 }
 
 @MainActor
@@ -107,7 +303,7 @@ struct NativeBrowserView: View {
     @StateObject var model: BrowserModel
     @StateObject var images: CameraImageLoader
     let showSettings: () -> Void
-    @FocusState private var focusedPhoto: CameraPhoto?
+    @StateObject private var galleryFocus = GalleryFocus()
     @State private var previewFocusRevision = 0
     private var bluetoothTarget: Bool { if case .bluetooth = model.target { return true }; return false }
     var body: some View {
@@ -146,7 +342,7 @@ struct NativeBrowserView: View {
         }
         .background(Color(nsColor: .windowBackgroundColor))
         .preferredColorScheme(.dark)
-        .onChange(of: model.preview) { photo in focusedPhoto = photo == nil ? model.active : nil }
+        .onChange(of: model.photos) { _ in galleryFocus.pending = nil }
         .accessibilityIdentifier("camera-browser")
     }
     private var header: some View {
@@ -182,25 +378,41 @@ struct NativeBrowserView: View {
         }.controlSize(.small)
     }
     private var gallery: some View {
-        Group {
-            if model.photos.isEmpty {
-                VStack(spacing: 12) {
-                    Image(systemName: "camera").font(.system(size: 34)).foregroundStyle(.secondary)
-                    Text(model.connection.isConnected ? "No photos on this camera." : "Connect to your camera to browse photos.")
-                        .font(.callout).foregroundStyle(.secondary)
-                }.frame(maxWidth: .infinity, maxHeight: .infinity)
-            } else {
-                ScrollViewReader { proxy in
-                    ScrollView {
-                        if model.listView {
-                            LazyVStack(spacing: 8) { ForEach(model.photos) { photo in photoRow(photo) } }.padding(12)
-                        } else {
-                            LazyVGrid(columns: [GridItem(.adaptive(minimum: 145), spacing: 10)], spacing: 10) {
-                                ForEach(model.photos) { photo in photoCard(photo) }
-                            }.padding(12)
-                        }
-                    }.accessibilityLabel("Camera photo gallery")
-                        .onChange(of: focusedPhoto) { photo in if let photo = photo { proxy.scrollTo(photo) } }
+        GeometryReader { geometry in
+            let columns = GalleryMetrics.columns(width: geometry.size.width)
+            Group {
+                if model.photos.isEmpty {
+                    VStack(spacing: 12) {
+                        Image(systemName: "camera").font(.system(size: 34)).foregroundStyle(.secondary)
+                        Text(model.connection.isConnected ? "No photos on this camera." : "Connect to your camera to browse photos.")
+                            .font(.callout).foregroundStyle(.secondary)
+                    }.frame(maxWidth: .infinity, maxHeight: .infinity)
+                } else {
+                    ScrollViewReader { proxy in
+                        ScrollView {
+                            if model.listView {
+                                LazyVStack(spacing: 8) {
+                                    ForEach(model.photos) { photo in photoItem(photo, columns: columns) }
+                                }.padding(GalleryMetrics.padding)
+                            } else {
+                                LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: GalleryMetrics.spacing), count: columns), spacing: GalleryMetrics.spacing) {
+                                    ForEach(model.photos) { photo in photoItem(photo, columns: columns) }
+                                }.padding(GalleryMetrics.padding)
+                            }
+                        }.accessibilityLabel("Camera photo gallery")
+                            .background(GalleryEntry(focus: galleryFocus, enabled: { model.preview == nil }) {
+                                galleryFocus.navigate($0, model: model, columns: columns)
+                            }.frame(width: 0, height: 0))
+                            .onChange(of: model.active) { photo in
+                                if galleryFocus.ownsFocus, let photo = photo {
+                                    proxy.scrollTo(photo)
+                                    galleryFocus.restore(photo)
+                                }
+                            }
+                            .onChange(of: model.preview) { photo in
+                                if photo == nil, let active = model.active { proxy.scrollTo(active) }
+                            }
+                    }
                 }
             }
         }
@@ -209,44 +421,53 @@ struct NativeBrowserView: View {
         CameraImageView(photo: photo, rendition: .thumbnail, loader: images)
             .id(CameraImageKey(generation: images.generation, photo: photo, rendition: .thumbnail))
     }
-    private func photoCard(_ photo: CameraPhoto) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Button { model.openPreview(photo) } label: {
-                VStack(alignment: .leading, spacing: 5) {
+    private func photoItem(_ photo: CameraPhoto, columns: Int) -> some View {
+        ZStack {
+            photoContent(photo).accessibilityHidden(true)
+            GalleryItemInput(photo: photo, model: model, focus: galleryFocus, columns: columns)
+        }
+            .help(photo.path)
+            .background(model.selected.contains(photo) ? Color.accentColor.opacity(0.2) : Color.primary.opacity(0.03))
+            .cornerRadius(6)
+            .overlay(RoundedRectangle(cornerRadius: 6).stroke(model.selected.contains(photo) ? Color.accentColor : Color.clear, lineWidth: 1).allowsHitTesting(false))
+            .overlay(RoundedRectangle(cornerRadius: 4).inset(by: 3).stroke(model.active == photo ? Color.white.opacity(0.85) : Color.clear, lineWidth: 2).allowsHitTesting(false))
+            .id(photo)
+    }
+    private func photoContent(_ photo: CameraPhoto) -> some View {
+        Group {
+            if model.listView {
+                HStack(spacing: 10) {
+                    Color.clear.frame(width: 20)
+                    thumbnail(photo).frame(width: 80, height: 54).clipped()
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text(photo.file).lineLimit(1).truncationMode(.middle)
+                        Text(photo.dir).font(.caption).foregroundStyle(.secondary)
+                    }
+                    Spacer(minLength: 0)
+                }.padding(7).frame(height: 68)
+            } else {
+                VStack(alignment: .leading, spacing: 6) {
                     thumbnail(photo).frame(height: 110).clipped()
                     Text(photo.file).font(.caption).lineLimit(1).truncationMode(.middle)
-                }.contentShape(Rectangle())
-            }.buttonStyle(.plain).accessibilityLabel("Preview " + photo.file)
-                .focused($focusedPhoto, equals: photo)
-            HStack {
-                Toggle("Select " + photo.file, isOn: Binding(get: { model.selected.contains(photo) }, set: { _ in model.toggle(photo) }))
-                    .labelsHidden().toggleStyle(.checkbox).accessibilityLabel("Select " + photo.file)
-                Text(photo.dir).font(.caption2).foregroundStyle(.secondary).lineLimit(1)
-                Spacer(minLength: 0)
+                    HStack {
+                        Color.clear.frame(width: 20, height: 20)
+                        Text(photo.dir).font(.caption2).foregroundStyle(.secondary).lineLimit(1)
+                        Spacer(minLength: 0)
+                    }
+                }.padding(7)
             }
-        }.padding(7).background(model.selected.contains(photo) ? Color.accentColor.opacity(0.2) : Color.primary.opacity(0.03))
-            .cornerRadius(6).overlay(RoundedRectangle(cornerRadius: 6).stroke(model.selected.contains(photo) ? Color.accentColor : .clear))
-            .id(photo).help(photo.path)
+        }
     }
-    private func photoRow(_ photo: CameraPhoto) -> some View {
-        HStack(spacing: 10) {
-            Toggle("Select " + photo.file, isOn: Binding(get: { model.selected.contains(photo) }, set: { _ in model.toggle(photo) }))
-                .labelsHidden().toggleStyle(.checkbox).accessibilityLabel("Select " + photo.file)
-            Button { model.openPreview(photo) } label: {
-                HStack(spacing: 10) {
-                    thumbnail(photo).frame(width: 80, height: 54)
-                    VStack(alignment: .leading) { Text(photo.file).lineLimit(1); Text(photo.dir).font(.caption).foregroundStyle(.secondary) }
-                    Spacer(minLength: 0)
-                }.contentShape(Rectangle())
-            }.buttonStyle(.plain).accessibilityLabel("Preview " + photo.file).focused($focusedPhoto, equals: photo)
-        }.padding(7).background(model.selected.contains(photo) ? Color.accentColor.opacity(0.2) : Color.primary.opacity(0.03)).cornerRadius(6).id(photo)
+    private func dismissPreview() {
+        model.closePreview()
+        galleryFocus.restore(model.active, afterPreview: true)
     }
     private func preview(_ photo: CameraPhoto) -> some View {
         VStack(spacing: 8) {
             HStack {
                 Text(model.previewPosition).font(.caption).lineLimit(1).truncationMode(.middle).help(model.previewPosition)
                 Spacer(minLength: 4)
-                Button { model.closePreview() } label: { Image(systemName: "xmark") }.accessibilityLabel("Close preview")
+                Button { dismissPreview() } label: { Image(systemName: "xmark") }.accessibilityLabel("Close preview")
             }
             CameraImageView(photo: photo, rendition: .preview, loader: images)
                 .onTapGesture { previewFocusRevision += 1 }
@@ -260,8 +481,8 @@ struct NativeBrowserView: View {
                 Button { model.navigatePreview(1) } label: { Image(systemName: "chevron.right") }.accessibilityLabel("Next photo")
             }.controlSize(.small)
         }.padding(12).background(Color(nsColor: .windowBackgroundColor))
-            .background(PreviewKeyboard(photo: photo, focusRevision: previewFocusRevision) { key in
-                if key == 53 { model.closePreview() }
+            .background(PreviewKeyboard(photo: photo, focusRevision: previewFocusRevision, restore: { galleryFocus.restore(model.active, afterPreview: true) }) { key in
+                if key == 53 { dismissPreview() }
                 else { model.navigatePreview(key == 123 ? -1 : 1) }
             }.frame(width: 0, height: 0))
             .accessibilityElement(children: .contain).accessibilityLabel("Photo preview")

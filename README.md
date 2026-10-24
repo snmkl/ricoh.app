@@ -48,7 +48,22 @@ Closing preview returns focus to the active gallery photo. Browsing and selectio
 remain available during exports, with shared progress above the preview. Failed
 images have a placeholder and a **Retry image** context-menu action.
 
-Finder-style Command/Shift selection is a separate, unimplemented change.
+Command-click anywhere on a photo (including its checkbox) to toggle it without
+opening preview. Shift-click selects the inclusive range from the last clicked or
+keyboard-focused photo, following displayed order across camera directories.
+Shift takes precedence when Command is also held.
+
+With the gallery focused, use **Shift+Arrow** to extend or shrink that range. Left
+and Right follow photo order; Up and Down move by the current grid row, or by one
+photo in list view. Reversing direction contracts the range and can cross its
+anchor. Independent selections made before the range remain selected, even when
+it shrinks. Releasing Shift preserves the range for later adjustment.
+
+The white inset outline marks the active photo; blue marks selected membership.
+Closing preview restores gallery focus. Switching grid/list or resizing preserves
+the range. **Clear selection** and **Select all/Deselect all** start a fresh range
+from the retained active photo. Plain-click still opens preview, and an unmodified
+checkbox toggles only its photo.
 
 ### Connect via Bluetooth
 
@@ -109,6 +124,7 @@ Discovered via firmware reverse engineering ([source](https://notes.secretsauce.
 
 - `AppDelegate.swift` owns bootstrap, menus and the main AppKit window;
   `AppController.swift` owns modal/sheet presentation and platform lifecycle hooks.
+- `PhotoSelection.swift` owns membership, active identity, range anchor and baseline.
 - `BrowserModel.swift`, `NativeBrowser.swift`, and `NativeSettings.swift` provide
   observable presentation state and native views. Gallery identity uses directory
   plus filename, independently of image request completion.

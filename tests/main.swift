@@ -4,8 +4,11 @@ import Cocoa
     switch ProcessInfo.processInfo.environment["GRBROWSER_TEST_SUITE"] {
     case "settings": runSettingsTests()
     case "images": runImageLoaderTests()
-    case "browser": runNativeBrowserTests(); runNativeAdmissionTests()
+    case "selection": runSelectionTests(); runNativeSelectionTests()
+    case "browser": runSelectionTests(); runNativeSelectionTests(); runNativeBrowserTests(); runNativeAdmissionTests()
     default:
+        runSelectionTests()
+        runNativeSelectionTests()
         runNativeBrowserTests()
         runNativeAdmissionTests()
         runImageLoaderTests()

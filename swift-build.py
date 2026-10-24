@@ -10,7 +10,7 @@ SOURCES = [
     'CameraImageLoader.swift', 'CameraAPI.swift', 'OperationModels.swift', 'Preferences.swift', 'PlatformAccess.swift', 'CameraHTTP.swift',
     'CameraDiscovery.swift', 'SessionHealthMonitor.swift', 'CameraConnection.swift', 'DownloadService.swift', 'FolderChooser.swift',
     'CameraBluetooth.swift', 'CoreBluetoothTransport.swift', 'BluetoothConnection.swift',
-    'NativeBrowser.swift', 'NativeSettings.swift', 'BrowserModel.swift', 'AppController.swift', 'AppDelegate.swift',
+    'PhotoSelection.swift', 'NativeBrowser.swift', 'NativeSettings.swift', 'BrowserModel.swift', 'AppController.swift', 'AppDelegate.swift',
 ]
 FRAMEWORKS = ['CoreBluetooth', 'CoreWLAN', 'CoreLocation',
               'Security', 'Cocoa', 'SwiftUI', 'ImageIO']

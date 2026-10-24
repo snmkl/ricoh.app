@@ -8,8 +8,9 @@ final class BrowserModel: ObservableObject {
     let images: CameraImageLoader
     @Published private(set) var settings = SettingsSnapshot()
     @Published private(set) var photos: [CameraPhoto] = []
-    @Published private(set) var selected = Set<CameraPhoto>()
-    @Published private(set) var active: CameraPhoto?
+    @Published private(set) var selection = PhotoSelection()
+    var selected: Set<CameraPhoto> { selection.selected }
+    var active: CameraPhoto? { selection.active }
     @Published private(set) var preview: CameraPhoto?
     @Published var listView = false
     @Published private(set) var progress: DownloadEvent?
@@ -118,29 +119,36 @@ final class BrowserModel: ObservableObject {
     }
     func toggle(_ photo: CameraPhoto) {
         guard photos.contains(photo) else { return }
-        active = photo
-        if selected.contains(photo) { selected.remove(photo) } else { selected.insert(photo) }
+        selection.toggle(photo)
     }
     func selectAll() {
-        selected = selected.count == photos.count ? [] : Set(photos)
+        selection.bulk(selected.count == photos.count ? [] : Set(photos))
     }
-    func clearSelection() { selected = [] }
+    func clearSelection() { selection.bulk([]) }
+    func focusPhoto(_ photo: CameraPhoto) {
+        guard photos.contains(photo) else { return }
+        selection.focus(photo)
+    }
+    func selectRange(to photo: CameraPhoto) { selection.range(to: photo, in: photos) }
+    func moveSelection(_ direction: GalleryDirection, columns: Int) {
+        selection.move(direction, in: photos, columns: columns, list: listView)
+    }
     func openPreview(_ photo: CameraPhoto) {
         guard photos.contains(photo) else { return }
-        active = photo; preview = photo
+        selection.origin(photo); preview = photo
     }
     func closePreview() { preview = nil }
     func navigatePreview(_ delta: Int) {
         guard let photo = preview, let index = photos.firstIndex(of: photo), !photos.isEmpty else { return }
         let next = photos[(index + delta + photos.count) % photos.count]
-        active = next; preview = next
+        selection.origin(next); preview = next
     }
     var previewPosition: String {
         guard let photo = preview, let index = photos.firstIndex(of: photo) else { return "" }
         return "\(photo.file) · \(photo.dir) · \(index + 1)/\(photos.count)"
     }
     private func clearLibrary() {
-        photos = []; selected = []; active = nil; preview = nil; librarySession = nil
+        photos = []; selection = PhotoSelection(); preview = nil; librarySession = nil
         images.invalidate()
     }
 }
