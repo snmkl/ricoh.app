@@ -10,6 +10,9 @@ SwiftUI renders the browser and Settings inside AppKit windows. Camera verificat
 image loading, and original downloads use independent `URLSession` policies. No web
 view or proxy server is required. Thumbnail and preview requests share a two-request
 scheduler and a 64 MiB decoded-image cache; thumbnails are downsampled in memory.
+Thumbnails and previews apply embedded EXIF orientation, falling back to the camera's
+`/info` orientation when a reduced JPEG omits EXIF, so portrait photos display upright.
+Original downloads retain their camera-provided bytes and metadata.
 
 ## Requirements
 

@@ -29,6 +29,9 @@ struct CameraAPI {
     func photo(_ path: String, rendition: String? = nil) throws -> URL {
         try url(["v1", "photos"] + Self.components(path), rendition: rendition)
     }
+    func photoInfo(_ path: String) throws -> URL {
+        try url(["v1", "photos"] + Self.components(path) + ["info"])
+    }
     func request(_ url: URL, timeout: TimeInterval? = nil) -> URLRequest {
         var value = URLRequest(url: url)
         if let timeout = timeout { value.timeoutInterval = timeout }

@@ -1,5 +1,6 @@
 import Cocoa
 import Combine
+import CoreImage
 import ImageIO
 
 protocol CameraImageTransport {
@@ -59,6 +60,7 @@ final class CameraImageLoader: ObservableObject {
     private let transport: CameraImageTransport
     private let api: CameraAPI
     private let decodeQueue = DispatchQueue(label: "GRBrowser.images.decode", qos: .userInitiated)
+    nonisolated private static let orientationContext = CIContext()
     private var work: [CameraImageKey: Work] = [:]
     // Retired requests keep their concurrency slot until cancellation is acknowledged.
     private var active: [UUID: Work] = [:]
@@ -128,33 +130,90 @@ final class CameraImageLoader: ObservableObject {
             }
         }
     }
-    private func complete(_ job: Work, result: Result<Data, Error>) {
-        guard active[job.token] != nil else { return }
+    private func accepts(_ job: Work) -> Bool {
+        guard active[job.token] != nil else { return false }
         guard !job.retired, job.key.generation == generation, work[job.key] === job else {
-            active.removeValue(forKey: job.token); pump(); return
+            active.removeValue(forKey: job.token); pump(); return false
         }
+        return true
+    }
+    private func complete(_ job: Work, result: Result<Data, Error>) {
+        guard accepts(job) else { return }
+        guard case .success(let data) = result else { decode(job, result: result); return }
+        let token = job.token
+        decodeQueue.async {
+            let needsOrientation = Self.needsCameraOrientation(data)
+            DispatchQueue.main.async {
+                guard let job = self.active[token], self.accepts(job) else { return }
+                if needsOrientation { self.fetchOrientation(job, data: data) }
+                else { self.decode(job, result: result) }
+            }
+        }
+    }
+    nonisolated private static func needsCameraOrientation(_ data: Data) -> Bool {
+        guard let source = CGImageSourceCreateWithData(data as CFData, nil),
+              CGImageSourceGetType(source) as String? == "public.jpeg" else { return false }
+        let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any]
+        guard let orientation = properties?[kCGImagePropertyOrientation] as? Int else { return true }
+        return !(1...8).contains(orientation)
+    }
+    private func fetchOrientation(_ job: Work, data: Data) {
+        // Reduced camera JPEGs may omit EXIF. Keep the same scheduler slot and
+        // cancellation token through /info so metadata obeys the image limit too.
+        guard let url = try? api.photoInfo(job.key.photo.path) else { decode(job, result: .success(data)); return }
+        job.cancel = transport.fetch(api.request(url)) { [weak self, weak job] result in
+            DispatchQueue.main.async {
+                guard let self = self, let job = job, self.accepts(job) else { return }
+                struct Metadata: Decodable { let orientation: Int }
+                let orientation = try? result.flatMap { data in
+                    Result { try JSONDecoder().decode(Metadata.self, from: data).orientation }
+                }.get()
+                // Missing or failed metadata must not hide an otherwise valid image.
+                self.decode(job, result: .success(data), orientation: orientation.flatMap { (1...8).contains($0) ? $0 : nil })
+            }
+        }
+    }
+    private func decode(_ job: Work, result: Result<Data, Error>, orientation: Int? = nil) {
         let pixels = configuration.thumbnailPixels
         let rendition = job.key.rendition
         let token = job.token
         decodeQueue.async {
-            let decoded = result.flatMap { Self.decode($0, rendition: rendition, pixels: pixels) }
+            let decoded = result.flatMap { Self.decode($0, rendition: rendition, pixels: pixels, orientation: orientation) }
             DispatchQueue.main.async {
                 guard let job = self.active[token] else { return }
                 self.finishDecoded(job, result: decoded)
             }
         }
     }
-    nonisolated private static func decode(_ data: Data, rendition: ImageRendition, pixels: Int) -> Result<(NSImage, Int), Error> {
+    nonisolated private static func decode(_ data: Data, rendition: ImageRendition, pixels: Int,
+                                          orientation: Int?) -> Result<(NSImage, Int), Error> {
         guard let source = CGImageSourceCreateWithData(data as CFData, nil) else { return .failure(URLError(.cannotDecodeContentData)) }
-        let image: CGImage?
+        let maxPixels: Int
         if rendition == .thumbnail {
-            image = CGImageSourceCreateThumbnailAtIndex(source, 0, [
-                kCGImageSourceCreateThumbnailFromImageAlways: true,
-                kCGImageSourceThumbnailMaxPixelSize: pixels,
-                kCGImageSourceCreateThumbnailWithTransform: true,
-                kCGImageSourceShouldCacheImmediately: true] as CFDictionary)
-        } else { image = CGImageSourceCreateImageAtIndex(source, 0, [kCGImageSourceShouldCacheImmediately: true] as CFDictionary) }
-        guard let image = image else { return .failure(URLError(.cannotDecodeContentData)) }
+            maxPixels = pixels
+        } else {
+            guard let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
+                  let width = properties[kCGImagePropertyPixelWidth] as? Int,
+                  let height = properties[kCGImagePropertyPixelHeight] as? Int,
+                  width > 0, height > 0 else { return .failure(URLError(.cannotDecodeContentData)) }
+            maxPixels = max(width, height)
+        }
+        // CGImage alone loses EXIF orientation. Apply it to pixels for both renditions;
+        // the preview uses the source dimensions to retain its full resolution.
+        guard var image = CGImageSourceCreateThumbnailAtIndex(source, 0, [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceThumbnailMaxPixelSize: maxPixels,
+            kCGImageSourceCreateThumbnailWithTransform: true,
+            kCGImageSourceShouldCacheImmediately: true] as CFDictionary) else {
+            return .failure(URLError(.cannotDecodeContentData))
+        }
+        if let orientation = orientation, orientation != 1 {
+            let oriented = CIImage(cgImage: image).oriented(forExifOrientation: Int32(orientation))
+            guard let transformed = orientationContext.createCGImage(oriented, from: oriented.extent) else {
+                return .failure(URLError(.cannotDecodeContentData))
+            }
+            image = transformed
+        }
         return .success((NSImage(cgImage: image, size: NSSize(width: image.width, height: image.height)), image.bytesPerRow * image.height))
     }
     private func finishDecoded(_ job: Work, result: Result<(NSImage, Int), Error>) {

@@ -1,4 +1,5 @@
 import Cocoa
+import ImageIO
 
 final class FakeImageTransport: CameraImageTransport {
     struct Request {
@@ -21,7 +22,165 @@ func fixturePNG() -> Data {
     context.fill(CGRect(x: 0, y: 0, width: 80, height: 40))
     return NSBitmapImageRep(cgImage: context.makeImage()!).representation(using: .png, properties: [:])!
 }
+
+// Four distinct corners catch wrong rotation direction and mirrored EXIF values.
+func fixtureOrientedJPEG(_ orientation: Int?) -> Data {
+    let bitmap = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: 80, pixelsHigh: 40,
+        bitsPerSample: 8, samplesPerPixel: 3, hasAlpha: false, isPlanar: false,
+        colorSpaceName: .deviceRGB, bytesPerRow: 240, bitsPerPixel: 24)!
+    let colors: [[UInt8]] = [[255, 0, 0], [0, 255, 0], [0, 0, 255], [255, 255, 0]]
+    for y in 0..<40 {
+        for x in 0..<80 {
+            let color = colors[(y / 20) * 2 + x / 40]
+            for channel in 0..<3 { bitmap.bitmapData![y * 240 + x * 3 + channel] = color[channel] }
+        }
+    }
+    let data = NSMutableData()
+    let destination = CGImageDestinationCreateWithData(data, "public.jpeg" as CFString, 1, nil)!
+    var properties: [CFString: Any] = [kCGImageDestinationLossyCompressionQuality: 1.0]
+    if let orientation = orientation { properties[kCGImagePropertyOrientation] = orientation }
+    CGImageDestinationAddImage(destination, bitmap.cgImage!, properties as CFDictionary)
+    check(CGImageDestinationFinalize(destination), "Encode EXIF orientation fixture")
+    return data as Data
+}
+
+@MainActor func runImageOrientationTests() {
+    // Expected top-left, top-right, bottom-left, bottom-right colors for EXIF 1...8.
+    let corners = ["RGBY", "GRYB", "YBGR", "BYRG", "RBGY", "BRYG", "YGBR", "GYRB"]
+    let colors: [(Character, [CGFloat])] = [("R", [1, 0, 0]), ("G", [0, 1, 0]),
+                                           ("B", [0, 0, 1]), ("Y", [1, 1, 0])]
+    for orientation in [nil] + (1...8).map({ Optional($0) }) {
+        let data = fixtureOrientedJPEG(orientation)
+        let expected = corners[(orientation ?? 1) - 1]
+        for rendition in [ImageRendition.thumbnail, .preview] {
+            let transport = FakeImageTransport()
+            let loader = CameraImageLoader(transport: transport, configuration: .init(thumbnailPixels: 16))
+            let photo = CameraPhoto(dir: "DCIM", file: "orientation-\(orientation ?? 0).JPG")
+            var result: Result<NSImage, Error>?
+            _ = loader.request(photo, rendition: rendition) { result = $0 }
+            transport.finish(0, .success(data))
+            if orientation == nil {
+                waitFor("missing EXIF requests camera metadata") { transport.requests.count == 2 }
+                transport.finish(1, .success(Data("{}".utf8)))
+            }
+            waitFor("oriented \(rendition) decodes") { result != nil }
+            let image = try! result!.get()
+            let rotated = (orientation ?? 1) >= 5
+            let longSide = rendition == .thumbnail ? 16 : 80
+            let shortSide = longSide / 2
+            let size = NSSize(width: rotated ? shortSide : longSide, height: rotated ? longSide : shortSide)
+            check(image.size == size, "\(rendition) EXIF \(orientation ?? 0) has oriented dimensions")
+            let bitmap = NSBitmapImageRep(cgImage: image.cgImage(forProposedRect: nil, context: nil, hints: nil)!)
+            var actual = ""
+            for (x, y) in [(1, 1), (3, 1), (1, 3), (3, 3)] {
+                let color = bitmap.colorAt(x: bitmap.pixelsWide * x / 4, y: bitmap.pixelsHigh * y / 4)!
+                    .usingColorSpace(.deviceRGB)!
+                let components = [color.redComponent, color.greenComponent, color.blueComponent]
+                let nearest = colors.min { lhs, rhs in
+                    zip(components, lhs.1).reduce(CGFloat(0)) { $0 + abs($1.0 - $1.1) } <
+                    zip(components, rhs.1).reduce(CGFloat(0)) { $0 + abs($1.0 - $1.1) }
+                }!
+                actual.append(nearest.0)
+            }
+            check(actual == expected, "\(rendition) EXIF \(orientation ?? 0) corners: expected \(expected), got \(actual)")
+            var cached: NSImage?
+            _ = loader.request(photo, rendition: rendition) { cached = try? $0.get() }
+            check(cached === image && transport.requests.count == (orientation == nil ? 2 : 1), "Oriented image reused from cache")
+        }
+    }
+    // Reduced camera JPEGs can omit EXIF; /info supplies the source orientation.
+    for orientation in 1...8 {
+        for rendition in [ImageRendition.thumbnail, .preview] {
+            let transport = FakeImageTransport()
+            let loader = CameraImageLoader(transport: transport, configuration: .init(thumbnailPixels: 16))
+            let photo = CameraPhoto(dir: "100 RICOH", file: "fallback #\(orientation).JPG")
+            var result: Result<NSImage, Error>?
+            _ = loader.request(photo, rendition: rendition) { result = $0 }
+            transport.finish(0, .success(fixtureOrientedJPEG(nil)))
+            waitFor("camera orientation request") { transport.requests.count == 2 }
+            check(transport.requests[1].url.path == "/v1/photos/\(photo.path)/info" && transport.requests[1].url.query == nil,
+                  "Metadata endpoint preserves path and has no size query")
+            transport.finish(1, .success(Data("{\"orientation\":\(orientation)}".utf8)))
+            waitFor("camera-oriented rendition") { result != nil }
+            let image = try! result!.get()
+            let bitmap = NSBitmapImageRep(cgImage: image.cgImage(forProposedRect: nil, context: nil, hints: nil)!)
+            let longSide = rendition == .thumbnail ? 16 : 80
+            check(image.size == NSSize(width: orientation >= 5 ? longSide / 2 : longSide,
+                                      height: orientation >= 5 ? longSide : longSide / 2), "Camera orientation dimensions")
+            var actual = ""
+            for (x, y) in [(1, 1), (3, 1), (1, 3), (3, 3)] {
+                let color = bitmap.colorAt(x: bitmap.pixelsWide * x / 4, y: bitmap.pixelsHigh * y / 4)!.usingColorSpace(.deviceRGB)!
+                let components = [color.redComponent, color.greenComponent, color.blueComponent]
+                actual.append(colors.min { lhs, rhs in
+                    zip(components, lhs.1).reduce(CGFloat(0)) { $0 + abs($1.0 - $1.1) } <
+                    zip(components, rhs.1).reduce(CGFloat(0)) { $0 + abs($1.0 - $1.1) }
+                }!.0)
+            }
+            check(actual == corners[orientation - 1], "Camera \(rendition) orientation \(orientation) corners: \(actual)")
+            var cached: NSImage?
+            _ = loader.request(photo, rendition: rendition) { cached = try? $0.get() }
+            check(cached === image && transport.requests.count == 2, "Camera-oriented image cached without more requests")
+        }
+    }
+    print("PASS: thumbnails and previews honor all eight embedded and camera-provided orientations, missing metadata and cache reuse")
+}
+@MainActor func runCameraOrientationLifecycleTests() {
+    let photo = CameraPhoto(dir: "DCIM", file: "no-exif.JPG")
+    let jpeg = fixtureOrientedJPEG(nil)
+    let invalidMetadata: [Result<Data, Error>] = ["{}", "invalid JSON", "{\"orientation\":0}",
+        "{\"orientation\":9}", "{\"orientation\":true}", "{\"orientation\":6.5}",
+        "{\"orientation\":\"6\"}"].map { .success(Data($0.utf8)) } + [.failure(URLError(.timedOut))]
+    for metadata in invalidMetadata {
+        let transport = FakeImageTransport()
+        let loader = CameraImageLoader(transport: transport)
+        var result: Result<NSImage, Error>?
+        _ = loader.request(photo, rendition: .preview) { result = $0 }
+        transport.finish(0, .success(jpeg))
+        waitFor("optional metadata fetch") { transport.requests.count == 2 }
+        transport.finish(1, metadata)
+        waitFor("image survives invalid/unavailable metadata") { result != nil }
+        check((try? result!.get().size) == NSSize(width: 80, height: 40), "Metadata failure preserves an unrotated valid image")
+        check(loader.activeCount == 0 && transport.requests.count == 2, "Metadata failure releases slot without retry")
+    }
+
+    let transport = FakeImageTransport()
+    let loader = CameraImageLoader(transport: transport, configuration: .init(concurrency: 1))
+    var callbacks = 0
+    let first = loader.request(photo, rendition: .thumbnail) { _ in callbacks += 1 }
+    let second = loader.request(photo, rendition: .thumbnail) { _ in callbacks += 1 }
+    var preview: NSImage?
+    _ = loader.request(photo, rendition: .preview) { preview = try? $0.get() }
+    transport.finish(0, .success(jpeg))
+    waitFor("shared metadata demand") { transport.requests.count == 2 }
+    check(loader.activeCount == 1 && transport.requests[1].url.lastPathComponent == "info", "Metadata shares image concurrency slot")
+    first()
+    check(!transport.requests[1].cancelled, "Shared image demand retains metadata")
+    second()
+    check(transport.requests[1].cancelled && transport.requests.count == 2, "Last consumer cancels metadata and awaits acknowledgement")
+    transport.finish(1, .success(Data("{\"orientation\":6}".utf8)))
+    waitFor("queued preview admitted after metadata cancellation") { transport.requests.count == 3 }
+    transport.finish(2, .success(fixtureOrientedJPEG(8)))
+    waitFor("preview after cancelled thumbnail") { preview != nil }
+    check(callbacks == 0 && preview!.size == NSSize(width: 40, height: 80), "Cancelled metadata cannot deliver or double-rotate embedded EXIF")
+
+    _ = loader.request(photo, rendition: .thumbnail) { _ in callbacks += 1 }
+    transport.finish(3, .success(jpeg))
+    waitFor("old library metadata fetch") { transport.requests.count == 5 }
+    loader.invalidate()
+    var reconnected: NSImage?
+    _ = loader.request(photo, rendition: .thumbnail) { reconnected = try? $0.get() }
+    check(transport.requests[4].cancelled && transport.requests.count == 5 && loader.cachedCost == 0,
+          "Library invalidation cancels metadata and clears oriented cache")
+    transport.finish(4, .success(Data("{\"orientation\":6}".utf8)))
+    waitFor("new library admission") { transport.requests.count == 6 }
+    transport.finish(5, .success(fixtureOrientedJPEG(1)))
+    waitFor("new library image") { reconnected != nil }
+    check(callbacks == 0 && reconnected!.size == NSSize(width: 80, height: 40), "Stale orientation never enters a new library")
+    print("PASS: optional metadata failures, bounded/coalesced metadata, cancellation and generation isolation")
+}
 @MainActor func runImageLoaderTests() {
+    runImageOrientationTests()
+    runCameraOrientationLifecycleTests()
     let transport = FakeImageTransport()
     let loader = CameraImageLoader(transport: transport)
     check(loader.concurrencyLimit == 2 && loader.cacheLimit == 64 * 1024 * 1024, "Default image concurrency and decoded cache bounds")

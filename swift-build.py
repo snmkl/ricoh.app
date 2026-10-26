@@ -13,7 +13,7 @@ SOURCES = [
     'PhotoSelection.swift', 'NativeBrowser.swift', 'NativeSettings.swift', 'BrowserModel.swift', 'AppController.swift', 'AppDelegate.swift',
 ]
 FRAMEWORKS = ['CoreBluetooth', 'CoreWLAN', 'CoreLocation',
-              'Security', 'Cocoa', 'SwiftUI', 'ImageIO']
+              'Security', 'Cocoa', 'SwiftUI', 'ImageIO', 'CoreImage']
 
 def compile_swift(output, *, tests=False, embedded_plist=False):
     sources = [ROOT / s for s in SOURCES]
