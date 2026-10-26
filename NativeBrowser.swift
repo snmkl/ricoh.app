@@ -35,15 +35,23 @@ struct CameraImageView: View {
     }
 }
 
-struct BluetoothRouteIcon: View {
-    var body: some View {
-        Path { path in
-            path.move(to: CGPoint(x: 5, y: 1)); path.addLine(to: CGPoint(x: 5, y: 17))
-            path.addLine(to: CGPoint(x: 11, y: 12)); path.addLine(to: CGPoint(x: 0, y: 4))
-            path.move(to: CGPoint(x: 5, y: 1)); path.addLine(to: CGPoint(x: 11, y: 6))
-            path.addLine(to: CGPoint(x: 0, y: 14))
-        }.stroke(lineWidth: 1.5).frame(width: 12, height: 18)
-    }
+enum BluetoothRouteIcon {
+    // Native menus extract images from their labels; a SwiftUI Path is discarded.
+    static let image: NSImage = {
+        let image = NSImage(size: NSSize(width: 14, height: 18), flipped: true) { _ in
+            let path = NSBezierPath()
+            path.move(to: NSPoint(x: 6, y: 1)); path.line(to: NSPoint(x: 6, y: 17))
+            path.line(to: NSPoint(x: 12, y: 12)); path.line(to: NSPoint(x: 1, y: 4))
+            path.move(to: NSPoint(x: 6, y: 1)); path.line(to: NSPoint(x: 12, y: 6))
+            path.line(to: NSPoint(x: 1, y: 14))
+            path.lineWidth = 1.5
+            NSColor.black.setStroke()
+            path.stroke()
+            return true
+        }
+        image.isTemplate = true
+        return image
+    }()
 }
 
 struct DownloadProgressView: View {
@@ -137,9 +145,9 @@ final class GalleryFocus: ObservableObject {
         fulfill()
     }
     func fulfill() {
-        guard let photo = pending, let item = items.allObjects.first(where: { $0.photo == photo }),
+        guard let photo = pending, let item = items.allObjects.first(where: { $0.photo == photo && $0.window != nil }),
               let window = item.window, NSApp.modalWindow == nil, window.attachedSheet == nil else { return }
-        let previewReturn = returningFromPreview && (window.firstResponder === window.contentView || window.firstResponder is PreviewKeyResponder || window.firstResponder == nil)
+        let previewReturn = returningFromPreview && (window.firstResponder === window || window.firstResponder === window.contentView || window.firstResponder is PreviewKeyResponder || window.firstResponder == nil)
         guard window.firstResponder === requestedFrom || ownsFocus || previewReturn else { pending = nil; return }
         restoring = true
         window.makeFirstResponder(item)
@@ -348,25 +356,34 @@ struct NativeBrowserView: View {
     private var header: some View {
         HStack(spacing: 6) {
             Spacer(minLength: 0)
-            Group { if bluetoothTarget { BluetoothRouteIcon() } else { Image(systemName: "wifi").frame(width: 14) } }
-                .foregroundStyle(.secondary).accessibilityHidden(true)
-            Picker(bluetoothTarget ? "Bluetooth connection target" : "Wi-Fi connection target", selection: Binding(get: { model.target }, set: { model.selectTarget($0) })) {
-                Section("Current Wi-Fi") { Text(model.currentLabel).tag(ConnectionTarget.currentWiFi) }
-                if !model.settings.cameras.isEmpty {
-                    Section("Bluetooth cameras") {
-                        ForEach(model.settings.cameras) { camera in
-                            Text(model.cameraLabel(camera)).tag(ConnectionTarget.bluetooth(camera.id))
+            Menu {
+                Picker("Connection target", selection: Binding(get: { model.target }, set: { model.selectTarget($0) })) {
+                    Section("Current Wi-Fi") { Text(model.currentLabel).tag(ConnectionTarget.currentWiFi) }
+                    if !model.settings.cameras.isEmpty {
+                        Section("Bluetooth cameras") {
+                            ForEach(model.settings.cameras) { camera in
+                                Text(model.cameraLabel(camera)).tag(ConnectionTarget.bluetooth(camera.id))
+                            }
                         }
                     }
-                }
-                if !model.networkTargets.isEmpty {
-                    Section("Camera Wi-Fi networks") {
-                        ForEach(model.networkTargets) { network in Text(network.network.name).tag(ConnectionTarget.network(network.id)) }
+                    if !model.networkTargets.isEmpty {
+                        Section("Camera Wi-Fi networks") {
+                            ForEach(model.networkTargets) { network in Text(network.network.name).tag(ConnectionTarget.network(network.id)) }
+                        }
                     }
+                }.labelsHidden().pickerStyle(.inline)
+            } label: {
+                Label {
+                    Text(model.targetLabel).lineLimit(1).truncationMode(.middle)
+                } icon: {
+                    if bluetoothTarget { Image(nsImage: BluetoothRouteIcon.image) }
+                    else { Image(systemName: "wifi") }
                 }
-            }.labelsHidden().pickerStyle(.menu).frame(minWidth: 80, idealWidth: 280, maxWidth: 320)
+            }.menuStyle(.borderedButton).labelStyle(.titleAndIcon)
+                .frame(minWidth: 80, idealWidth: 280, maxWidth: 320)
                 .layoutPriority(-1).disabled(!model.targetsEnabled)
                 .help((bluetoothTarget ? "Bluetooth · " : "Wi-Fi · ") + model.targetLabel)
+                .accessibilityLabel(bluetoothTarget ? "Bluetooth connection target" : "Wi-Fi connection target")
                 .accessibilityValue(model.targetLabel)
             Button { model.connection.findBluetooth() } label: { Label("Find cameras…", systemImage: "magnifyingglass") }
                 .fixedSize().help("Find nearby Ricoh cameras using Bluetooth")

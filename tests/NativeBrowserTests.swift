@@ -40,6 +40,11 @@ func accessibilityFrame(_ item: NSObject) -> NSRect? {
     func elements() -> [NSObject] { accessibleElements(host) }
     func element(_ label: String) -> NSObject? { elements().first { accessibilityText($0, "accessibilityLabel") == label } }
     waitFor("native header accessibility") { element("Find cameras") != nil && element("Settings") != nil }
+    func routeImage() -> NSImage? {
+        descendants(host, of: NSButton.self).first { $0.title == model.targetLabel }?.image
+    }
+    waitFor("Bluetooth selector supplies an image to the native menu button") { routeImage() != nil }
+    let bluetoothImage = routeImage()
     check(element("Bluetooth connection target") != nil && element("DISCONNECT") != nil, "Native route and lifecycle accessible controls: \(elements().compactMap { accessibilityText($0, "accessibilityLabel") })")
     let header = ["Bluetooth connection target", "Find cameras", "DISCONNECT", "Settings"].compactMap { element($0).flatMap(accessibilityFrame) }
     let content = window.convertToScreen(host.convert(host.bounds, to: nil))
@@ -122,6 +127,9 @@ func accessibilityFrame(_ item: NSObject) -> NSRect? {
     let prepares = rig.radio.prepares
     model.useManualWiFi()
     check(model.target == .currentWiFi && rig.radio.prepares == prepares, "Native manual recovery only selects explicit Wi-Fi route")
+    waitFor("Wi-Fi selector image updates") {
+        element("Wi-Fi connection target") != nil && routeImage() != nil && routeImage() !== bluetoothImage
+    }
     window.close()
     print("PASS: native browser routes/lifecycle, minimum header, stable selection/images, literal text, preview responder/focus, progress, stale events, cancellation and manual recovery")
 }
