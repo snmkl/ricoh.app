@@ -28,8 +28,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         )
         window.title = "GR IIIx Browser"
         controller.mainWindow = window
-        window.contentView = NSHostingView(rootView: NativeBrowserView(model: self.controller.model,
-            images: self.controller.model.images, showSettings: { [weak self] in self?.controller.showSettings() }))
+        window.contentView = NativeBrowserHostingView(model: controller.model,
+            images: controller.model.images, showSettings: { [weak self] in self?.controller.showSettings() })
         window.titlebarAppearsTransparent = true
         window.backgroundColor = NSColor(red: 0.04, green: 0.04, blue: 0.04, alpha: 1)
         window.minSize = NSSize(width: 480, height: 360)
@@ -63,6 +63,12 @@ func makeApplicationMenu(settingsTarget: AnyObject, action: Selector) -> NSMenu 
         appMenu.addItem(settingsItem)
         appMenu.addItem(.separator())
         appMenu.addItem(NSMenuItem(title: "Quit GRBrowser", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
+        let editItem = NSMenuItem()
+        editItem.title = "Edit"
+        let editMenu = NSMenu(title: "Edit")
+        editItem.submenu = editMenu
+        editMenu.addItem(NSMenuItem(title: "Select All", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a"))
+        menu.addItem(editItem)
         return menu
 
 }

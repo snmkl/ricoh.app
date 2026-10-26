@@ -33,7 +33,7 @@ func accessibilityFrame(_ item: NSObject) -> NSRect? {
                           styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
     window.isReleasedWhenClosed = false
     controller.mainWindow = window
-    let host = NSHostingView(rootView: NativeBrowserView(model: model, images: loader, showSettings: controller.showSettings))
+    let host = NativeBrowserHostingView(model: model, images: loader, showSettings: controller.showSettings)
     window.contentView = host
     window.makeKeyAndOrderFront(nil)
     app.activate(ignoringOtherApps: true)

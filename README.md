@@ -56,6 +56,9 @@ opening preview. Shift-click selects the inclusive range from the last clicked o
 keyboard-focused photo, following displayed order across camera directories.
 Shift takes precedence when Command is also held.
 
+Press **Cmd+A** (Edit → Select All) to select every image in either view. Pressing
+it again keeps all images selected; use **Deselect all** or **Clear selection** to clear them.
+
 With the gallery focused, use **Shift+Arrow** to extend or shrink that range. Left
 and Right follow photo order; Up and Down move by the current grid row, or by one
 photo in list view. Reversing direction contracts the range and can cross its

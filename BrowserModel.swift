@@ -121,8 +121,10 @@ final class BrowserModel: ObservableObject {
         guard photos.contains(photo) else { return }
         selection.toggle(photo)
     }
-    func selectAll() {
-        selection.bulk(selected.count == photos.count ? [] : Set(photos))
+    func selectAll() { selection.bulk(Set(photos)) }
+    func toggleSelectAll() {
+        if selected.count == photos.count { clearSelection() }
+        else { selectAll() }
     }
     func clearSelection() { selection.bulk([]) }
     func focusPhoto(_ photo: CameraPhoto) {

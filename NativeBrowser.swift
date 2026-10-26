@@ -1,6 +1,29 @@
 import Cocoa
 import SwiftUI
 
+// Route the standard menu action through the browser's responder chain so text
+// fields keep their own Select All behavior and other windows stay independent.
+@MainActor
+final class NativeBrowserHostingView: NSHostingView<NativeBrowserView>, NSMenuItemValidation {
+    private var model: BrowserModel?
+    convenience init(model: BrowserModel, images: CameraImageLoader, showSettings: @escaping () -> Void) {
+        self.init(rootView: NativeBrowserView(model: model, images: images, showSettings: showSettings))
+        self.model = model
+    }
+    private var canSelectAll: Bool {
+        guard let model = model else { return false }
+        return !model.photos.isEmpty && model.preview == nil && NSApp.modalWindow == nil && window?.attachedSheet == nil
+    }
+    override func selectAll(_ sender: Any?) {
+        guard canSelectAll else { return }
+        model?.selectAll()
+    }
+    func validateMenuItem(_ item: NSMenuItem) -> Bool {
+        if item.action == #selector(selectAll(_:)) { return canSelectAll }
+        return super.validateUserInterfaceItem(item)
+    }
+}
+
 @MainActor
 struct CameraImageView: View {
     let photo: CameraPhoto
@@ -334,7 +357,7 @@ struct NativeBrowserView: View {
                     Image(systemName: "square.grid.2x2").tag(false)
                     Image(systemName: "list.bullet").tag(true)
                 }.labelsHidden().pickerStyle(.segmented).frame(width: 68).accessibilityLabel("Gallery view")
-                Button(model.selected.count == model.photos.count && !model.photos.isEmpty ? "Deselect all" : "Select all", action: model.selectAll)
+                Button(model.selected.count == model.photos.count && !model.photos.isEmpty ? "Deselect all" : "Select all", action: model.toggleSelectAll)
                     .disabled(model.photos.isEmpty)
                 Button(action: model.clearSelection) { Image(systemName: "xmark.circle") }
                     .disabled(model.selected.isEmpty).accessibilityLabel("Clear selection").help("Clear selection")

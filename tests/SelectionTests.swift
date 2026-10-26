@@ -96,7 +96,11 @@ import SwiftUI
     let window = NSWindow(contentRect: NSRect(x: 100, y: 100, width: 500, height: 650),
                           styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
     window.isReleasedWhenClosed = false; controller.mainWindow = window
-    let host = NSHostingView(rootView: NativeBrowserView(model: model, images: loader, showSettings: controller.showSettings))
+    let menu = makeApplicationMenu(settingsTarget: controller, action: #selector(AppController.showSettings))
+    let previousMenu = app.mainMenu
+    app.mainMenu = menu
+    defer { app.mainMenu = previousMenu }
+    let host = NativeBrowserHostingView(model: model, images: loader, showSettings: controller.showSettings)
     window.contentView = host; window.makeKeyAndOrderFront(nil); app.activate(ignoringOtherApps: true)
     func settle() {
         let until = Date().addingTimeInterval(0.12)
@@ -132,13 +136,48 @@ import SwiftUI
             isARepeat: repeatKey, keyCode: code)!)
         settle()
     }
+    func selectAllKey() {
+        let event = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: .command, timestamp: 0,
+            windowNumber: window.windowNumber, context: nil, characters: "a", charactersIgnoringModifiers: "a",
+            isARepeat: false, keyCode: 0)!
+        // CLI fixtures can lack an application key window. Start the menu action
+        // at this window's real first responder in that environment.
+        let item = menu.items[1].submenu!.items[0]
+        if app.keyWindow == nil {
+            var responder = window.firstResponder
+            while let current = responder, !current.responds(to: item.action!) { responder = current.nextResponder }
+            item.target = responder
+        }
+        defer { item.target = nil }
+        _ = menu.performKeyEquivalent(with: event)
+        settle()
+    }
     waitFor("native gallery input") { !items().isEmpty }
     waitFor("native accessible checkbox label") {
         accessibleElements(host).contains { accessibilityText($0, "accessibilityLabel") == "Select " + photos[0].file }
     }
     settle()
+    window.makeFirstResponder(host)
+    selectAllKey()
+    check(model.selected == Set(photos) && model.active == nil, "Command-A selects the whole library before any photo interaction")
+    model.clearSelection()
     for list in [false, true] {
         model.listView = list; settle()
+        model.clearSelection(); click(1, "checkbox")
+        let focused = window.firstResponder
+        selectAllKey(); selectAllKey()
+        check(model.selected == Set(photos) && model.selectedFiles == photos.map(\.path),
+              "Repeated Command-A selects all photos including offscreen and duplicate basenames, list=\(list)")
+        check(window.firstResponder === focused && model.active == photos[1] && model.selection.anchor == nil,
+              "Command-A preserves active focus and resets the range session")
+        model.clearSelection(); window.makeFirstResponder(item(1).checkbox)
+        selectAllKey()
+        check(model.selected == Set(photos), "Command-A works from a focused photo checkbox")
+        model.toggleSelectAll()
+        check(model.selected.isEmpty, "Deselect all button still clears the whole selection")
+        model.toggleSelectAll()
+        check(model.selected == Set(photos), "Select all button still selects the whole library")
+        model.clearSelection()
         for region in ["thumbnail", "label", "padding", "checkbox"] {
             model.clearSelection()
             click(0, region, .command)
@@ -173,6 +212,8 @@ import SwiftUI
         check(target.previewButton.accessibilityPerformPress(), "Native preview supports AX press")
         waitFor("accessible preview responder") { window.firstResponder is PreviewKeyResponder }
         check(model.preview == photos[1] && model.selected == [photos[1]], "Accessible preview retains selection")
+        selectAllKey()
+        check(model.preview == photos[1] && model.selected == [photos[1]], "Preview excludes Command-A gallery selection")
         key(124)
         check(model.preview == photos[1] && model.selected == [photos[1]], "Preview excludes Shift range keys")
         // Preview navigation changes the return origin, even though its old
@@ -210,25 +251,32 @@ import SwiftUI
         check(model.selected == selected && model.active == active, "Additional modifiers are excluded")
     }
     let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 100, height: 22))
+    field.stringValue = "Editable text"
     host.addSubview(field); window.makeFirstResponder(field)
     let selected = model.selected
     key(124)
     check(model.selected == selected && !(window.firstResponder is GalleryItemResponder), "Editable field owns Shift arrows and updates never steal focus")
+    selectAllKey()
+    check(model.selected == selected && (window.firstResponder as? NSTextView)?.selectedRange() == NSRange(location: 0, length: field.stringValue.utf16.count),
+          "Command-A selects editable text without changing photo membership")
     let button = NSButton(title: "Other control", target: nil, action: nil)
     button.frame = field.frame; host.addSubview(button); window.makeFirstResponder(button); key(125)
     check(model.selected == selected && window.firstResponder === button, "Other native control owns its arrows")
+    selectAllKey()
+    check(model.selected == Set(photos) && window.firstResponder === button, "Command-A works while a browser toolbar control owns focus")
+    model.clearSelection(); selected.forEach { model.toggle($0) }
     button.removeFromSuperview(); field.removeFromSuperview()
     window.makeFirstResponder(item(2))
     let sheet = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 200, height: 100), styleMask: [.titled], backing: .buffered, defer: false)
     window.beginSheet(sheet)
     key(124)
+    selectAllKey()
     check(model.selected == selected, "Attached sheet excludes gallery navigation")
     window.endSheet(sheet); sheet.orderOut(nil)
     waitFor("gallery sheet dismissed") { window.attachedSheet == nil }
 
     // Production menu shortcut stays available with the gallery as responder.
     window.makeFirstResponder(item(2))
-    let menu = makeApplicationMenu(settingsTarget: controller, action: #selector(AppController.showSettings))
     var inspectedModal = false
     let timer = Timer(timeInterval: 0.05, repeats: true) { _ in
         MainActor.assumeIsolated {
@@ -236,6 +284,7 @@ import SwiftUI
             inspectedModal = true
             let before = model.selected
             key(124)
+            selectAllKey()
             check(model.selected == before, "Settings modal excludes gallery input")
             modal.performClose(nil)
         }
@@ -322,6 +371,7 @@ import SwiftUI
     model.primaryAction(); rig.camera.result = .success([])
     model.primaryAction(); waitFor("empty camera fixture") { rig.connection.isConnected }
     model.moveSelection(.right, columns: 3); model.selectRange(to: photos[0]); model.toggle(photos[0]); model.selectAll()
+    settle(); window.makeFirstResponder(host); selectAllKey()
     check(model.photos.isEmpty && model.selected.isEmpty && model.active == nil, "Empty native library ignores stale actions")
     window.close()
     print("PASS: native modifier regions, AX actions, key repeat/focus, guards, resized grids, lazy scrolling, captured export and library resets")
