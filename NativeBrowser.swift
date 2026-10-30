@@ -378,7 +378,6 @@ struct NativeBrowserView: View {
     }
     private var header: some View {
         HStack(spacing: 6) {
-            Spacer(minLength: 0)
             Menu {
                 Picker("Connection target", selection: Binding(get: { model.target }, set: { model.selectTarget($0) })) {
                     Section("Current Wi-Fi") { Text(model.currentLabel).tag(ConnectionTarget.currentWiFi) }
@@ -403,19 +402,22 @@ struct NativeBrowserView: View {
                     else { Image(systemName: "wifi") }
                 }
             }.menuStyle(.borderedButton).labelStyle(.titleAndIcon)
-                .frame(minWidth: 80, idealWidth: 280, maxWidth: 320)
-                .layoutPriority(-1).disabled(!model.targetsEnabled)
+                .disabled(!model.targetsEnabled)
                 .help((bluetoothTarget ? "Bluetooth · " : "Wi-Fi · ") + model.targetLabel)
                 .accessibilityLabel(bluetoothTarget ? "Bluetooth connection target" : "Wi-Fi connection target")
                 .accessibilityValue(model.targetLabel)
-            Button { model.connection.findBluetooth() } label: { Label("Find cameras…", systemImage: "magnifyingglass") }
-                .fixedSize().help("Find nearby Ricoh cameras using Bluetooth")
-                .accessibilityLabel("Find cameras").disabled(!model.targetsEnabled)
+            Button { model.connection.findBluetooth() } label: { Image(systemName: "arrow.clockwise") }
+                .fixedSize().help("Refresh cameras list")
+                .accessibilityLabel("Refresh cameras list").disabled(!model.targetsEnabled)
             Button(model.primaryLabel, action: model.primaryAction)
-                .font(.system(size: 10, weight: .semibold, design: .monospaced)).frame(width: 100)
+                .font(.system(size: 10, weight: .semibold, design: .monospaced)).fixedSize()
+                .help("Connect to selected camera")
                 .disabled(!model.primaryEnabled).accessibilityLabel(model.primaryLabel)
-            Button(action: showSettings) { Image(systemName: "gearshape") }.help("Settings (⌘,)").accessibilityLabel("Settings")
+                .padding(.leading, 18)
+            Button(action: showSettings) { Image(systemName: "gearshape") }.help("Settings").accessibilityLabel("Settings")
         }.controlSize(.small)
+            .fixedSize()
+            .frame(maxWidth: .infinity, alignment: .trailing)
     }
     private var gallery: some View {
         GeometryReader { geometry in

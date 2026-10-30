@@ -39,14 +39,14 @@ func accessibilityFrame(_ item: NSObject) -> NSRect? {
     app.activate(ignoringOtherApps: true)
     func elements() -> [NSObject] { accessibleElements(host) }
     func element(_ label: String) -> NSObject? { elements().first { accessibilityText($0, "accessibilityLabel") == label } }
-    waitFor("native header accessibility") { element("Find cameras") != nil && element("Settings") != nil }
+    waitFor("native header accessibility") { element("Refresh cameras list") != nil && element("Settings") != nil }
     func routeImage() -> NSImage? {
         descendants(host, of: NSButton.self).first { $0.title == model.targetLabel }?.image
     }
     waitFor("Bluetooth selector supplies an image to the native menu button") { routeImage() != nil }
     let bluetoothImage = routeImage()
     check(element("Bluetooth connection target") != nil && element("DISCONNECT") != nil, "Native route and lifecycle accessible controls: \(elements().compactMap { accessibilityText($0, "accessibilityLabel") })")
-    let header = ["Bluetooth connection target", "Find cameras", "DISCONNECT", "Settings"].compactMap { element($0).flatMap(accessibilityFrame) }
+    let header = ["Bluetooth connection target", "Refresh cameras list", "DISCONNECT", "Settings"].compactMap { element($0).flatMap(accessibilityFrame) }
     let content = window.convertToScreen(host.convert(host.bounds, to: nil))
     check(header.count == 4 && header.allSatisfy { $0.minX >= content.minX - 1 && $0.maxX <= content.maxX + 1 }
           && header.map(\.midY).max()! - header.map(\.midY).min()! < 4,
