@@ -79,18 +79,26 @@ enum BluetoothRouteIcon {
 
 struct DownloadProgressView: View {
     let event: DownloadEvent
+    let cancel: () -> Void
     var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            HStack {
-                Text(event.phase.label).font(.caption.bold())
-                Spacer()
-                Text("\(event.completed)/\(event.total) files").font(.caption.monospacedDigit())
+        HStack(spacing: 10) {
+            VStack(alignment: .leading, spacing: 4) {
+                HStack {
+                    Text(event.phase.label).font(.caption.bold())
+                    Spacer()
+                    Text("\(event.completed)/\(event.total) files").font(.caption.monospacedDigit())
+                }
+                if event.phase == .downloading, let fraction = event.fraction {
+                    ProgressView(value: fraction).accessibilityLabel("Download progress")
+                        .accessibilityValue("\(Int(fraction * 100)) percent")
+                } else { ProgressView().progressViewStyle(.linear).accessibilityLabel(event.phase.label) }
+                Text(event.filename).font(.caption2).lineLimit(1).truncationMode(.middle).help(event.filename)
             }
-            if event.phase == .downloading, let fraction = event.fraction {
-                ProgressView(value: fraction).accessibilityLabel("Download progress")
-                    .accessibilityValue("\(Int(fraction * 100)) percent")
-            } else { ProgressView().progressViewStyle(.linear).accessibilityLabel(event.phase.label) }
-            Text(event.filename).font(.caption2).lineLimit(1).truncationMode(.middle).help(event.filename)
+            Button(action: cancel) {
+                Image(systemName: "xmark").font(.body.bold()).frame(width: 24, height: 24)
+            }
+            .buttonStyle(.plain).foregroundStyle(.red)
+            .help("Cancel download").accessibilityLabel("Cancel download")
         }.padding(10).background(Color.accentColor.opacity(0.14)).cornerRadius(6)
             .accessibilityElement(children: .contain).accessibilityLabel("Active download")
     }
@@ -350,7 +358,10 @@ struct NativeBrowserView: View {
                         .disabled(!model.targetsEnabled)
                 }
             }.padding(.horizontal, 12).padding(.vertical, 7)
-            if let progress = model.progress { DownloadProgressView(event: progress).padding(.horizontal, 12).padding(.bottom, 6) }
+            if let progress = model.progress {
+                DownloadProgressView(event: progress) { model.cancelDownload(id: progress.id) }
+                    .padding(.horizontal, 12).padding(.bottom, 6)
+            }
             HStack(spacing: 8) {
                 Text("View").fixedSize()
                 Picker("View", selection: $model.listView) {

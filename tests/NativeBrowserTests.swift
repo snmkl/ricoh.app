@@ -109,6 +109,20 @@ func accessibilityFrame(_ item: NSObject) -> NSRect? {
     sendKey(53, "\u{1b}")
     waitFor("actual Escape closes preview and restores gallery focus") { model.preview == nil && !(window.firstResponder is PreviewKeyResponder) }
     check(model.active == photos[1], "Preview return retains active identity")
+    model.requestDownload([photos[0].path])
+    waitFor("cancel download button") { element("Cancel download") != nil }
+    let cancelButton = element("Cancel download")!
+    check(accessibilityText(cancelButton, "accessibilityHelp") == "Cancel download", "Cancel button exposes its hint")
+    // SwiftUI exposes the Objective-C action without declaring protocol conformance.
+    let pressSelector = NSSelectorFromString("accessibilityPerformPress")
+    check(cancelButton.responds(to: pressSelector), "Cancel button supports a native accessibility press")
+    let press = unsafeBitCast(cancelButton.method(for: pressSelector),
+                             to: (@convention(c) (AnyObject, Selector) -> Bool).self)
+    check(press(cancelButton, pressSelector), "Cancel button accepts a native accessibility press")
+    waitFor("native download cancellation") { !download.isDownloading }
+    check(model.progress == nil && model.status == "Cancelled" && model.canDownload && model.primaryEnabled,
+          "Cancel button clears progress and restores controls")
+    check((try? fm.contentsOfDirectory(atPath: output.path).count) == 1, "Cancelled download publishes no extra photo")
     model.primaryAction()
     check(model.photos.isEmpty && model.selected.isEmpty && model.active == nil && model.preview == nil
           && loader.generation != generation, "Disconnect invalidates library state and images")

@@ -65,6 +65,53 @@ func runDownloadTests() {
           "Native guard rejects duplicate requests including at save time")
 
     _ = runDownload("save-cancelled", expected: "cancelled", cancel: true)
+    let cancelled = runDownload("transfer-cancelled", files: ["DCIM/slow.JPG", "OTHER/second.JPG"],
+                                expected: "cancelled", setup: { handler, _ in
+        handler.onObservedEvent = { event in
+            if event.phase == .downloading, let fraction = event.fraction, fraction > 0 {
+                handler.cancelDownload(id: event.id)
+            }
+        }
+    })
+    check(cancelled.saved.isEmpty && cancelled.terminal?.completed == 0 && !cancelled.isDownloading,
+          "Cancelling an active transfer publishes nothing and releases admission")
+    cancelled.onObservedEvent = nil
+    cancelled.startDownload(id: "retry-after-cancel", files: ["DCIM/one.JPG"])
+    cancelled.cancelDownload(id: "transfer-cancelled")
+    waitFor("retry after cancellation") { cancelled.terminal?.id == "retry-after-cancel" }
+    check(cancelled.terminal?.phase == .completed && cancelled.saved.count == 1,
+          "A fresh download succeeds and ignores cancellation for an old request")
+    check(cancelled.events.filter { $0.id == "transfer-cancelled" && $0.phase.terminal }.count == 1,
+          "Late URLSession callbacks cannot emit another cancellation outcome")
+    _ = runDownload("immediately-cancelled", expected: "cancelled", setup: { handler, _ in
+        handler.onObservedEvent = { event in
+            if event.phase == .preparing { handler.cancelDownload(id: event.id) }
+        }
+    })
+    let slowArchive = testRoot.appendingPathComponent("slow-archive.sh")
+    try! Data("#!/bin/sh\nexec /bin/sleep 10\n".utf8).write(to: slowArchive)
+    try! fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: slowArchive.path)
+    let archiveStarted = Date()
+    let archiveCancelled = runDownload("archive-cancelled", files: ["DCIM/one.JPG", "DCIM/two.JPG"],
+                                       archive: slowArchive, expected: "cancelled", setup: { handler, _ in
+        handler.onObservedEvent = { event in
+            if event.phase == .archiving { handler.cancelDownload(id: event.id) }
+        }
+    })
+    check(archiveCancelled.saved.isEmpty && Date().timeIntervalSince(archiveStarted) < 8,
+          "Cancellation stops a running archive and cleans staging before releasing admission")
+    let savingCancelled = runDownload("saving-cancelled", files: ["DCIM/one.JPG", "DCIM/two.JPG"],
+                                      expected: "cancelled", setup: { handler, _ in
+        handler.preferences.setFormat(.separate)
+        handler.onPublish = {
+            if handler.saved.count == 1 {
+                DispatchQueue.main.sync { handler.cancelDownload(id: "saving-cancelled") }
+            }
+        }
+    })
+    check(savingCancelled.saved.count == 1
+          && (try! fm.contentsOfDirectory(atPath: savingCancelled.destination!.path)).count == 1,
+          "Cancelling publication preserves saved photos and stops remaining files")
     _ = runDownload("save-write-failed", expected: "failed", setup: { handler, _ in
         handler.failAfter = 0
     })

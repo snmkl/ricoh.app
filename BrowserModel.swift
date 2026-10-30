@@ -117,6 +117,7 @@ final class BrowserModel: ObservableObject {
         download.start(DownloadRequest(id: UUID().uuidString, files: files))
         objectWillChange.send()
     }
+    func cancelDownload(id: String) { download.cancelDownload(id: id) }
     func toggle(_ photo: CameraPhoto) {
         guard photos.contains(photo) else { return }
         selection.toggle(photo)

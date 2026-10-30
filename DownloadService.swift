@@ -12,6 +12,7 @@ class DownloadService: NSObject, URLSessionDownloadDelegate, @unchecked Sendable
     var isDownloading: Bool { activeRequestID != nil }
     // Main-thread admission guard also rejects requests queued during a disk write.
     private var activeRequestID: String?
+    private var cancellation: Progress?
 
     // Operation state and delegate callbacks are confined to this serial queue.
     private let queue: OperationQueue = {
@@ -32,6 +33,7 @@ class DownloadService: NSObject, URLSessionDownloadDelegate, @unchecked Sendable
         let files: [String]
         let directory: URL
         let format: ExportFormat
+        let cancellation: Progress
         var destination: URL?
         var stagedFiles: [URL] = []
         var photosDirectory: URL { directory.appendingPathComponent("Photos", isDirectory: true) }
@@ -40,11 +42,12 @@ class DownloadService: NSObject, URLSessionDownloadDelegate, @unchecked Sendable
         var stagedFile: URL?
         var filename: String { (files[min(completed, files.count - 1)] as NSString).lastPathComponent }
 
-        init(id: String, files: [String], directory: URL, format: ExportFormat) {
+        init(id: String, files: [String], directory: URL, format: ExportFormat, cancellation: Progress) {
             self.id = id
             self.files = files
             self.directory = directory
             self.format = format
+            self.cancellation = cancellation
         }
     }
 
@@ -64,17 +67,38 @@ class DownloadService: NSObject, URLSessionDownloadDelegate, @unchecked Sendable
         precondition(Thread.isMainThread)
         guard activeRequestID == nil, canStart(), !id.isEmpty, !files.isEmpty else { return }
         activeRequestID = id
+        let cancellation = Progress(totalUnitCount: 1)
+        self.cancellation = cancellation
         let format = preferences.format
         queue.addOperation {
             let job = DownloadOperation(id: id, files: files,
-                directory: self.temporaryDirectory.appendingPathComponent("GRBrowser-\(UUID().uuidString)"), format: format)
+                directory: self.temporaryDirectory.appendingPathComponent("GRBrowser-\(UUID().uuidString)"),
+                format: format, cancellation: cancellation)
             self.operation = job
             self.emit(job, phase: .preparing)
             DispatchQueue.main.async { self.resolveDestination(job) }
         }
     }
 
+    func cancelDownload(id: String) {
+        precondition(Thread.isMainThread)
+        guard activeRequestID == id else { return }
+        // Signal synchronous archive/copy work immediately; queue cleanup with delegate callbacks.
+        cancellation?.cancel()
+        queue.addOperation {
+            guard let job = self.operation, job.id == id else { return }
+            self.finish(job, phase: .cancelled, message: "Cancelled")
+        }
+    }
+
+    private func checkCancellation() throws {
+        if operation?.cancellation.isCancelled == true { throw URLError(.cancelled) }
+    }
+
     private func downloadNext(_ job: DownloadOperation) {
+        guard !job.cancellation.isCancelled else {
+            finish(job, phase: .cancelled, message: "Cancelled"); return
+        }
         let file = job.files[job.completed]
         let api = CameraAPI(base: cameraBase)
         guard let url = try? api.photo(file) else {
@@ -105,6 +129,7 @@ class DownloadService: NSObject, URLSessionDownloadDelegate, @unchecked Sendable
                     didFinishDownloadingTo location: URL) {
         guard downloadTask === currentTask, let job = operation else { return }
         do {
+            try checkCancellation()
             guard let response = downloadTask.response as? HTTPURLResponse,
                   (200...299).contains(response.statusCode) else {
                 let status = (downloadTask.response as? HTTPURLResponse)?.statusCode ?? 0
@@ -147,6 +172,7 @@ class DownloadService: NSObject, URLSessionDownloadDelegate, @unchecked Sendable
     private func prepareSave(_ job: DownloadOperation) {
         var saved = 0
         do {
+            try checkCancellation()
             guard let directory = job.destination else { throw failure("No download folder selected") }
             let sources: [URL]
             if job.files.count > 1 && job.format == .zip {
@@ -159,6 +185,7 @@ class DownloadService: NSObject, URLSessionDownloadDelegate, @unchecked Sendable
             emit(job, phase: .saving)
             var lastName = ""
             for source in sources {
+                try checkCancellation()
                 let output = try publishFile(source, in: directory)
                 lastName = output.lastPathComponent
                 saved += 1
@@ -174,6 +201,7 @@ class DownloadService: NSObject, URLSessionDownloadDelegate, @unchecked Sendable
     // Copy beside the destination, then atomically rename with exclusive creation.
     // RENAME_EXCL protects both existing files and races with other writers.
     func publishFile(_ source: URL, in directory: URL) throws -> URL {
+        try checkCancellation()
         var template = Array(directory.appendingPathComponent(".GRBrowser-XXXXXX").path.utf8CString)
         let descriptor = mkstemp(&template)
         guard descriptor >= 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
@@ -183,6 +211,7 @@ class DownloadService: NSObject, URLSessionDownloadDelegate, @unchecked Sendable
         let input = try FileHandle(forReadingFrom: source)
         defer { try? input.close() }
         while let chunk = try input.read(upToCount: 1024 * 1024), !chunk.isEmpty {
+            try checkCancellation()
             try output.write(contentsOf: chunk)
         }
         try output.close()
@@ -190,6 +219,7 @@ class DownloadService: NSObject, URLSessionDownloadDelegate, @unchecked Sendable
         let stem = source.deletingPathExtension().lastPathComponent
         var suffix = 0
         while true {
+            try checkCancellation()
             let name = suffix == 0 ? source.lastPathComponent
                 : "\(stem) (\(suffix))" + (ext.isEmpty ? "" : ".\(ext)")
             let destination = directory.appendingPathComponent(name)
@@ -204,9 +234,10 @@ class DownloadService: NSObject, URLSessionDownloadDelegate, @unchecked Sendable
     }
 
     private func resolveDestination(_ job: DownloadOperation) {
+        guard activeRequestID == job.id, !job.cancellation.isCancelled else { return }
         func begin(_ directory: URL) {
             self.queue.addOperation {
-                guard self.operation === job else { return }
+                guard self.operation === job, !job.cancellation.isCancelled else { return }
                 job.destination = directory
                 do {
                     for file in job.files { _ = try CameraAPI.components(file) }
@@ -225,6 +256,7 @@ class DownloadService: NSObject, URLSessionDownloadDelegate, @unchecked Sendable
             begin(directory)
         } else {
             chooseDirectory { directory in
+                guard self.activeRequestID == job.id, !job.cancellation.isCancelled else { return }
                 guard let directory = directory else {
                     self.queue.addOperation { self.finish(job, phase: .cancelled, message: "Cancelled") }
                     return
@@ -245,13 +277,24 @@ class DownloadService: NSObject, URLSessionDownloadDelegate, @unchecked Sendable
 
     // These boundary methods also allow tests to inject save and filesystem failures.
     func createArchive(photos: URL, destination: URL) throws {
+        try checkCancellation()
         let process = Process()
         process.executableURL = archiveExecutable
         process.arguments = ["-c", "-k", "--keepParent", photos.path, destination.path]
         process.standardOutput = FileHandle.nullDevice
         process.standardError = FileHandle.nullDevice
+        let terminated = DispatchSemaphore(value: 0)
+        process.terminationHandler = { _ in terminated.signal() }
         try process.run()
+        while terminated.wait(timeout: .now() + 0.1) == .timedOut {
+            if operation?.cancellation.isCancelled == true {
+                if process.isRunning { process.terminate() }
+                process.waitUntilExit()
+                throw URLError(.cancelled)
+            }
+        }
         process.waitUntilExit()
+        try checkCancellation()
         guard process.terminationStatus == 0,
               let size = try FileManager.default.attributesOfItem(atPath: destination.path)[.size] as? NSNumber,
               size.int64Value > 0 else { throw failure("Could not create the photo archive") }
@@ -268,7 +311,7 @@ class DownloadService: NSObject, URLSessionDownloadDelegate, @unchecked Sendable
             total: job.files.count, filename: filename ?? job.filename, fraction: fraction, message: message)
         DispatchQueue.main.async {
             guard self.activeRequestID == job.id else { return }
-            if phase.terminal { self.activeRequestID = nil }
+            if phase.terminal { self.activeRequestID = nil; self.cancellation = nil }
             self.lastEvent = event
             self.deliverEvent(event)
         }
@@ -278,12 +321,13 @@ class DownloadService: NSObject, URLSessionDownloadDelegate, @unchecked Sendable
 
     private func finish(_ job: DownloadOperation, phase: DownloadPhase, message: String) {
         guard operation === job else { return }
+        let cancelled = job.cancellation.isCancelled
         session?.invalidateAndCancel()
         session = nil
         currentTask = nil
         try? FileManager.default.removeItem(at: job.directory)
         operation = nil
-        emit(job, phase: phase, message: message)
+        emit(job, phase: cancelled ? .cancelled : phase, message: cancelled ? "Cancelled" : message)
     }
 
     private func failure(_ message: String) -> Error {

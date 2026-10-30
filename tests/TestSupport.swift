@@ -37,7 +37,9 @@ final class ObservedDownload: DownloadService, @unchecked Sendable {
     var destination: URL?
     var saved: [URL] = []
     var failAfter: Int?
+    var onPublish: (() -> Void)?
     override func publishFile(_ source: URL, in directory: URL) throws -> URL {
+        onPublish?()
         if failAfter == saved.count { throw appError("Injected destination failure") }
         let result = try super.publishFile(source, in: directory)
         saved.append(result)
